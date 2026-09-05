@@ -1,0 +1,29 @@
+workflows:
+  android-release-build:
+    name: Build 0003 Downloader Release APK
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    scripts:
+      - name: Generate Keystore (First Build) & Compile Release APK
+        script: |
+          touch .env.example
+          touch .env
+          if [ ! -f "$CM_BUILD_DIR/my-upload-key.jks" ]; then
+            keytool -genkeypair -v \
+              -keystore "$CM_BUILD_DIR/my-upload-key.jks" \
+              -storetype PKCS12 \
+              -alias upload \
+              -keypass ali13821382ali \
+              -storepass ali13821382ali \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Ali Ziaee, OU=0003, O=0003 Downloader, L=Tehran, ST=Tehran, C=IR"
+          fi
+          curl -sL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip -o gradle-9.3.1-bin.zip
+          unzip -q gradle-9.3.1-bin.zip
+          export PATH=$(pwd)/gradle-9.3.1/bin:$PATH
+          gradle assembleRelease --no-daemon
+    artifacts:
+      - "**/build/outputs/apk/release/*.apk"
+      - "my-upload-key.jks"

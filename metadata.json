@@ -1,0 +1,6 @@
+{
+  "name": "0003 Downloader",
+  "description": "High-speed multi-threaded video downloader, in-app browser with media sniffer, and encrypted private vault.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
