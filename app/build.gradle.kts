@@ -21,6 +21,9 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndk {
+      abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64"))
+    }
   }
 
   signingConfigs {
@@ -67,6 +70,12 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -104,8 +113,12 @@ dependencies {
   implementation(libs.androidx.media3.exoplayer.hls)
   implementation(libs.androidx.media3.exoplayer.dash)
   implementation(libs.androidx.media3.ui)
+  implementation("androidx.media3:media3-transformer:1.3.1")
+  implementation("androidx.media3:media3-effect:1.3.1")
   implementation(libs.androidx.biometric)
   implementation(libs.androidx.security.crypto)
+  implementation(libs.youtubedl.android.library)
+  implementation(libs.youtubedl.android.ffmpeg)
   implementation(libs.firebase.ai)
   implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.firebase.appcheck.debug)

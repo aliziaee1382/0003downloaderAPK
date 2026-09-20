@@ -3,6 +3,7 @@ package ir.ali0003.downloader.downloader.core
 import android.content.Context
 import android.util.Log
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
+import ir.ali0003.downloader.data.settings.DownloadSettingsPreferences
 import ir.ali0003.downloader.downloader.model.DownloadProgress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -72,16 +73,19 @@ class ChunkDownloader(
         var lastTime = System.currentTimeMillis()
         var lastBytes = 0L
 
-        if (supportsRange && contentLength > 0) {
+        val settings = DownloadSettingsPreferences.getInstance(context)
+        val numThreads = settings.getEffectiveThreadCount().coerceIn(1, 16)
+
+        if (supportsRange && contentLength > 0 && numThreads > 1) {
             // Multi-threaded chunk range download
-            val chunkSize = contentLength / NUM_THREADS
+            val chunkSize = contentLength / numThreads
             val chunkFiles = mutableListOf<File>()
 
             try {
                 coroutineScope {
-                    val deferredList = (0 until NUM_THREADS).map { index ->
+                    val deferredList = (0 until numThreads).map { index ->
                         val startByte = index * chunkSize
-                        val endByte = if (index == NUM_THREADS - 1) contentLength - 1 else (index + 1) * chunkSize - 1
+                        val endByte = if (index == numThreads - 1) contentLength - 1 else (index + 1) * chunkSize - 1
                         val chunkFile = File(scratchDir, "part_$index.tmp")
                         chunkFiles.add(chunkFile)
 
@@ -315,7 +319,44 @@ class ChunkDownloader(
         }
     }
 
-    private fun parseHeaders(headersJson: String?): Map<String, String> {
+    /**
+     * Downloads an arbitrary direct stream to [outputFile] with byte-by-byte reporting.
+     * Can be invoked concurrently for separated DASH video and audio payload downloads.
+     */
+    fun downloadUrlToFile(
+        url: String,
+        headers: Map<String, String>,
+        outputFile: File,
+        onBytesRead: (Long) -> Unit
+    ): Long {
+        val requestBuilder = Request.Builder().url(url).get()
+        headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
+
+        val response = okHttpClient.newCall(requestBuilder.build()).execute()
+        if (!response.isSuccessful) {
+            throw java.io.IOException("HTTP error ${response.code} downloading $url")
+        }
+
+        val body = response.body ?: throw java.io.IOException("Empty response body from $url")
+        var totalRead = 0L
+
+        outputFile.parentFile?.mkdirs()
+        outputFile.outputStream().use { fos ->
+            body.byteStream().use { inputStream ->
+                val buffer = ByteArray(BUFFER_SIZE)
+                var read: Int
+                while (inputStream.read(buffer).also { read = it } != -1) {
+                    fos.write(buffer, 0, read)
+                    totalRead += read
+                    onBytesRead(read.toLong())
+                }
+                fos.flush()
+            }
+        }
+        return totalRead
+    }
+
+    fun parseHeaders(headersJson: String?): Map<String, String> {
         val map = mutableMapOf<String, String>()
         if (headersJson.isNullOrBlank()) return map
         try {

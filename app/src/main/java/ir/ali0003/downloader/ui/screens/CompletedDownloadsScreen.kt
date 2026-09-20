@@ -6,10 +6,11 @@ import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,12 +34,11 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.Movie
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -52,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,11 +60,14 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.data.vault.VaultFileManager
+import ir.ali0003.downloader.ui.dialogs.VideoActionMenuDialog
 import ir.ali0003.downloader.ui.glass.GlassBadge
 import ir.ali0003.downloader.ui.glass.GlassBox
 import ir.ali0003.downloader.ui.glass.GlassButton
 import ir.ali0003.downloader.ui.glass.GlassIconButton
 import ir.ali0003.downloader.ui.glass.GlassTheme
+import ir.ali0003.downloader.ui.media.VideoThumbnailLoader
+import ir.ali0003.downloader.ui.media.VideoThumbnailView
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -71,10 +75,12 @@ import java.util.Locale
 
 /**
  * Completed Downloads Library:
- * - Displays downloaded videos/audio with metadata, format badges, and playback controls.
+ * - Minimalist, high-performance video cards with 15-second dynamic thumbnails.
+ * - Contextual long-press frosted action sheet (`VideoActionMenuDialog`).
+ * - Full-bleed video title (2 lines) and clean metadata tags (Resolution, Size, Date).
  * - Multi-select mode for batch Share, Delete, and Vault Hide/Unhide.
- * - Frosted Glass Vault toggle header.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CompletedDownloadsScreen(
     downloads: List<DownloadTaskEntity>,
@@ -94,12 +100,17 @@ fun CompletedDownloadsScreen(
     val selectedIds = remember { mutableStateListOf<Long>() }
     val isSelectionMode = selectedIds.isNotEmpty()
 
+    // Contextual Action Menu Sheet state (Long-press)
+    var actionMenuTask by remember { mutableStateOf<DownloadTaskEntity?>(null) }
+    var taskToDelete by remember { mutableStateOf<DownloadTaskEntity?>(null) }
+
     val currentList = if (showVaultSection && isVaultUnlocked) vaultDownloads else downloads
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp)
+            .testTag("completed_downloads_screen")
     ) {
         // Library Sub-Header & Vault Shortcut
         Row(
@@ -118,7 +129,8 @@ fun CompletedDownloadsScreen(
                     modifier = Modifier
                         .clip(RoundedCornerShape(12.dp))
                         .clickable { showVaultSection = false }
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                        .testTag("tab_public_library"),
                     shape = RoundedCornerShape(12.dp),
                     backgroundColor = if (!showVaultSection) GlassTheme.colors.accentGlow.copy(alpha = 0.25f) else GlassTheme.colors.surfaceGlassSubtle
                 ) {
@@ -140,7 +152,8 @@ fun CompletedDownloadsScreen(
                                 onOpenVaultAuth()
                             }
                         }
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                        .testTag("tab_vault_library"),
                     shape = RoundedCornerShape(12.dp),
                     backgroundColor = if (showVaultSection && isVaultUnlocked) GlassTheme.colors.accentGlow.copy(alpha = 0.25f) else GlassTheme.colors.surfaceGlassSubtle
                 ) {
@@ -278,8 +291,11 @@ fun CompletedDownloadsScreen(
             ) {
                 items(currentList, key = { it.id }) { task ->
                     val isSelected = selectedIds.contains(task.id)
+                    val taskFile = remember(task.id) { vaultFileManager.resolveTaskFile(task) }
+
                     CompletedVideoCard(
                         task = task,
+                        file = taskFile,
                         isSelected = isSelected,
                         isSelectionMode = isSelectionMode,
                         onClick = {
@@ -290,121 +306,199 @@ fun CompletedDownloadsScreen(
                             }
                         },
                         onLongClick = {
-                            if (!isSelected) selectedIds.add(task.id)
-                        },
-                        onToggleVault = { onToggleVault(task) },
-                        onShare = { shareTasks(context, listOf(task), vaultFileManager) },
-                        onDelete = { onDelete(task) }
+                            if (isSelectionMode) {
+                                if (isSelected) selectedIds.remove(task.id) else selectedIds.add(task.id)
+                            } else {
+                                actionMenuTask = task
+                            }
+                        }
                     )
                 }
             }
         }
     }
+
+    // Contextual Long-Press Action Sheet
+    actionMenuTask?.let { task ->
+        val file = remember(task.id) { vaultFileManager.resolveTaskFile(task) }
+        VideoActionMenuDialog(
+            task = task,
+            file = file,
+            onDismiss = { actionMenuTask = null },
+            onPlayVideo = {
+                actionMenuTask = null
+                onPlayVideo(task)
+            },
+            onShareVideo = {
+                actionMenuTask = null
+                shareTasks(context, listOf(task), vaultFileManager)
+            },
+            onToggleVault = {
+                actionMenuTask = null
+                onToggleVault(task)
+            },
+            onDeleteVideo = {
+                actionMenuTask = null
+                taskToDelete = task
+            },
+            onEnterMultiSelect = {
+                actionMenuTask = null
+                if (!selectedIds.contains(task.id)) {
+                    selectedIds.add(task.id)
+                }
+            }
+        )
+    }
+
+    // Delete Confirmation Dialog
+    taskToDelete?.let { targetTask ->
+        AlertDialog(
+            onDismissRequest = { taskToDelete = null },
+            containerColor = GlassTheme.colors.cardBackground.copy(alpha = 0.98f),
+            title = {
+                Text(
+                    text = "Delete Video?",
+                    color = GlassTheme.colors.textPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "Are you sure you want to permanently delete \"${targetTask.fileName.trimStart('.').removeSuffix(".vault")}\"? This file will be removed from your device storage.",
+                    color = GlassTheme.colors.textSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                GlassButton(
+                    text = "Delete",
+                    icon = Icons.Default.Delete,
+                    onClick = {
+                        onDelete(targetTask)
+                        taskToDelete = null
+                    },
+                    isPrimary = true,
+                    modifier = Modifier.height(38.dp)
+                )
+            },
+            dismissButton = {
+                GlassButton(
+                    text = "Cancel",
+                    onClick = { taskToDelete = null },
+                    isPrimary = false,
+                    modifier = Modifier.height(38.dp)
+                )
+            }
+        )
+    }
 }
 
+/**
+ * Minimalist Completed Video Card:
+ * - Prominent 80x56 thumbnail with 15s native video frame capture.
+ * - Full horizontal real-estate: bold 2-line title and clean subtitle pills (1080p • 30.4 MB • Sep 5).
+ * - Click to play, Long-press for contextual action sheet.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CompletedVideoCard(
     task: DownloadTaskEntity,
+    file: File?,
     isSelected: Boolean,
     isSelectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onToggleVault: () -> Unit,
-    onShare: () -> Unit,
-    onDelete: () -> Unit
+    modifier: Modifier = Modifier
 ) {
     val isAudio = task.mimeType.contains("audio") || task.fileName.endsWith(".mp3")
-    val dateText = remember(task.completedAt) {
+    val resolutionTag = remember(task.fileName, task.url, file) {
+        VideoThumbnailLoader.resolveResolutionTag(task, file)
+    }
+    val dateText = remember(task.completedAt, task.createdAt) {
         val completed = task.completedAt
-        if (completed != null && completed > 0) {
-            SimpleDateFormat("MMM d, yyyy • h:mm a", Locale.getDefault()).format(Date(completed))
-        } else {
-            "Offline Ready"
-        }
+        val ts = if (completed != null && completed > 0) completed else task.createdAt
+        SimpleDateFormat("MMM d", Locale.getDefault()).format(Date(ts))
+    }
+    val displayTitle = remember(task.fileName) {
+        task.fileName.trimStart('.').removeSuffix(".vault")
     }
 
     GlassBox(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .border(
                 width = if (isSelected) 1.5.dp else 1.dp,
                 color = if (isSelected) GlassTheme.colors.accentGlow else GlassTheme.colors.glassBorder,
                 shape = RoundedCornerShape(16.dp)
-            ),
+            )
+            .testTag("completed_video_card_${task.id}"),
         shape = RoundedCornerShape(16.dp),
         backgroundColor = if (isSelected) GlassTheme.colors.accentGlow.copy(alpha = 0.15f) else GlassTheme.colors.cardBackground.copy(alpha = 0.85f)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Thumbnail / Format Icon Placeholder with Play Overlay
-            Box(
-                modifier = Modifier
-                    .size(54.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(GlassTheme.colors.surfaceGlassSubtle)
-                    .border(1.dp, GlassTheme.colors.glassBorder, RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
+            // 1. Dynamic 15-Second Video Thumbnail (80.dp x 56.dp)
+            VideoThumbnailView(
+                file = file,
+                task = task,
+                isAudio = isAudio
+            )
+
+            // 2. Info Column with 2 Full Lines of Title and Clean Subtitle Pills
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.Center
             ) {
-                Icon(
-                    imageVector = if (isAudio) Icons.Default.MusicNote else Icons.Default.Movie,
-                    contentDescription = null,
-                    tint = GlassTheme.colors.accentGlow,
-                    modifier = Modifier.size(24.dp)
+                Text(
+                    text = displayTitle,
+                    color = GlassTheme.colors.textPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 18.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
 
-                // Play triangle overlay badge
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(3.dp)
-                        .size(16.dp)
-                        .clip(CircleShape)
-                        .background(GlassTheme.colors.accentGlow),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Play",
-                        tint = Color.Black,
-                        modifier = Modifier.size(10.dp)
-                    )
-                }
-            }
+                Spacer(modifier = Modifier.height(5.dp))
 
-            // Info Column
-            Column(modifier = Modifier.weight(1f)) {
+                // Subtitle Line: 1080p • 30.4 MB • Sep 5
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    // Resolution Badge Pill
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(GlassTheme.colors.accentGlow.copy(alpha = 0.15f))
+                            .border(0.6.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.4f), RoundedCornerShape(5.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = resolutionTag,
+                            color = GlassTheme.colors.accentGlow,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
                     Text(
-                        text = task.fileName,
-                        color = GlassTheme.colors.textPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        text = "•",
+                        color = GlassTheme.colors.textMuted,
+                        fontSize = 10.sp
                     )
 
-                    if (task.isHidden) {
-                        GlassBadge(text = "VAULT", color = GlassTheme.colors.accentGlow)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(3.dp))
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
                     Text(
                         text = task.formattedTotalSize,
                         color = GlassTheme.colors.textSecondary,
@@ -415,24 +509,27 @@ fun CompletedVideoCard(
                     Text(
                         text = "•",
                         color = GlassTheme.colors.textMuted,
-                        fontSize = 11.sp
+                        fontSize = 10.sp
                     )
 
                     Text(
                         text = dateText,
                         color = GlassTheme.colors.textMuted,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        fontSize = 11.sp
                     )
+
+                    if (task.isHidden) {
+                        Spacer(modifier = Modifier.width(2.dp))
+                        GlassBadge(text = "VAULT", color = GlassTheme.colors.accentGlow)
+                    }
                 }
             }
 
-            // Action Icons (Vault, Share, Delete) or Selection Checkbox
+            // 3. Multi-Select Indicator Circle (Only visible during selection mode)
             if (isSelectionMode) {
                 Box(
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(24.dp)
                         .clip(CircleShape)
                         .background(if (isSelected) GlassTheme.colors.accentGlow else GlassTheme.colors.surfaceGlassSubtle)
                         .border(1.2.dp, if (isSelected) GlassTheme.colors.accentGlow else GlassTheme.colors.glassBorder, CircleShape),
@@ -443,43 +540,9 @@ fun CompletedVideoCard(
                             imageVector = Icons.Default.Check,
                             contentDescription = "Selected",
                             tint = Color.Black,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
                     }
-                }
-            } else {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Vault Toggle
-                    GlassIconButton(
-                        icon = if (task.isHidden) Icons.Default.VisibilityOff else Icons.Default.Lock,
-                        onClick = onToggleVault,
-                        tint = if (task.isHidden) GlassTheme.colors.accentGlow else GlassTheme.colors.textSecondary,
-                        size = 34.dp,
-                        iconSize = 16.dp,
-                        contentDescription = "Toggle Vault"
-                    )
-
-                    // Share
-                    GlassIconButton(
-                        icon = Icons.Default.Share,
-                        onClick = onShare,
-                        size = 34.dp,
-                        iconSize = 16.dp,
-                        contentDescription = "Share Video"
-                    )
-
-                    // Delete
-                    GlassIconButton(
-                        icon = Icons.Default.Delete,
-                        onClick = onDelete,
-                        tint = GlassTheme.colors.dangerGlass,
-                        size = 34.dp,
-                        iconSize = 16.dp,
-                        contentDescription = "Delete Video"
-                    )
                 }
             }
         }
@@ -506,7 +569,7 @@ private fun shareTasks(context: Context, tasks: List<DownloadTaskEntity>, vaultF
             }
             context.startActivity(Intent.createChooser(shareIntent, "Share Video"))
         }
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         // Fallback for direct share
     }
 }

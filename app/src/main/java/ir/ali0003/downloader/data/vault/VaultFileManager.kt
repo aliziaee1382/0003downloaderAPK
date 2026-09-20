@@ -114,12 +114,20 @@ class VaultFileManager(
 
     /**
      * Resolves the actual physical file for a given task, whether public or hidden in the vault.
+     * Also seamlessly resolves legacy tasks that were saved with .m3u8 instead of .mp4 (or vice versa).
      */
     fun resolveTaskFile(task: DownloadTaskEntity): File? {
         val cleanName = task.fileName.trimStart('.')
         val hiddenName = ".$cleanName$VAULT_EXTENSION"
 
-        val possiblePaths = listOf(
+        val altCleanName = when {
+            cleanName.endsWith(".m3u8", ignoreCase = true) -> cleanName.removeSuffix(".m3u8") + ".mp4"
+            cleanName.endsWith(".mp4", ignoreCase = true) -> cleanName.removeSuffix(".mp4") + ".m3u8"
+            else -> null
+        }
+        val altHiddenName = altCleanName?.let { ".$it$VAULT_EXTENSION" }
+
+        val possiblePaths = mutableListOf(
             File(vaultDir, hiddenName),
             File(vaultDir, cleanName),
             File(publicDownloadsDir, cleanName),
@@ -127,6 +135,17 @@ class VaultFileManager(
             File(context.filesDir, "vault_media/$hiddenName"),
             File(context.filesDir, cleanName)
         )
+
+        if (altCleanName != null) {
+            possiblePaths.add(File(publicDownloadsDir, altCleanName))
+            possiblePaths.add(File(vaultDir, altCleanName))
+            possiblePaths.add(File(context.filesDir, altCleanName))
+            possiblePaths.add(File(context.filesDir, "vault_media/$altCleanName"))
+        }
+        if (altHiddenName != null) {
+            possiblePaths.add(File(vaultDir, altHiddenName))
+            possiblePaths.add(File(context.filesDir, "vault_media/$altHiddenName"))
+        }
 
         return possiblePaths.firstOrNull { it.exists() } ?: if (task.isHidden) {
             File(vaultDir, hiddenName)

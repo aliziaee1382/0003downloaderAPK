@@ -40,6 +40,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ir.ali0003.downloader.browser.viewmodel.BrowserViewModel
+import ir.ali0003.downloader.util.BiometricHelper
 import ir.ali0003.downloader.ui.browser.InAppBrowserScreen
 import ir.ali0003.downloader.ui.glass.GlassBottomNavBar
 import ir.ali0003.downloader.ui.glass.GlassIconButton
@@ -90,6 +91,13 @@ fun MainAppNavigation(
     val pinInput by viewModel.pinInput.collectAsStateWithLifecycle()
     val pinError by viewModel.pinErrorMessage.collectAsStateWithLifecycle()
     val selectedPlayerTask by viewModel.selectedPlayerTask.collectAsStateWithLifecycle()
+
+    // Multi-segment thread count states
+    val threadCount by viewModel.threadCount.collectAsStateWithLifecycle()
+    val isMultiSegmentEnabled by viewModel.isMultiSegmentEnabled.collectAsStateWithLifecycle()
+
+    val isBiometricSupported = remember(context) { BiometricHelper.canAuthenticate(context) }
+    val isBiometricRegistered = viewModel.isBiometricRegistered
 
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showThemeDialog by remember { mutableStateOf(false) }
@@ -172,6 +180,14 @@ fun MainAppNavigation(
                             downloads = activeDownloads,
                             progressMap = taskProgressMap,
                             onAddDownload = { viewModel.addDemoDownload(isHidden = false) },
+                            onEnqueueDirect = { url, isHidden ->
+                                viewModel.enqueueManualDownload(url = url, isHidden = isHidden)
+                            },
+                            onInspectInBrowser = { url, isHidden ->
+                                browserViewModel.toggleSaveToVault(isHidden)
+                                viewModel.setSelectedTab(0)
+                                browserViewModel.navigateToUrl(url)
+                            },
                             onTogglePause = { viewModel.togglePause(it) },
                             onToggleVault = { viewModel.toggleVaultHidden(it) },
                             onDelete = { viewModel.deleteDownload(it) },
@@ -198,6 +214,14 @@ fun MainAppNavigation(
                     currentPreset = currentPreset,
                     themeMode = themeMode,
                     themeColorKey = themeColorKey,
+                    threadCount = threadCount,
+                    isMultiSegmentEnabled = isMultiSegmentEnabled,
+                    onThreadCountChange = { count ->
+                        viewModel.setThreadCount(count)
+                    },
+                    onMultiSegmentToggle = { enabled ->
+                        viewModel.setMultiSegmentEnabled(enabled)
+                    },
                     onSelectPreset = {
                         viewModel.setPreset(it)
                     },
@@ -233,13 +257,24 @@ fun MainAppNavigation(
             if (showVaultAuth) {
                 VaultLockpadDialog(
                     isConfigured = viewModel.isVaultConfigured,
+                    isBiometricRegistered = isBiometricRegistered,
+                    isBiometricSupported = isBiometricSupported,
                     pinInput = pinInput,
                     pinError = pinError,
                     onDigitClick = { viewModel.onPinDigit(it) },
                     onBackspaceClick = { viewModel.onPinBackspace() },
                     onBiometricClick = {
-                        launchBiometricPrompt(context) { success ->
-                            if (success) viewModel.unlockWithBiometrics()
+                        launchBiometricPrompt(
+                            context = context,
+                            isFirstTimeRegistration = !isBiometricRegistered
+                        ) { success ->
+                            if (success) {
+                                if (!isBiometricRegistered) {
+                                    viewModel.registerBiometricAndUnlock()
+                                } else {
+                                    viewModel.unlockWithBiometrics()
+                                }
+                            }
                         }
                     },
                     onDismiss = { viewModel.closeVaultAuthDialog() }
@@ -311,32 +346,27 @@ fun AppHeaderBar(
     }
 }
 
-private fun launchBiometricPrompt(context: Context, onResult: (Boolean) -> Unit) {
+private fun launchBiometricPrompt(
+    context: Context,
+    isFirstTimeRegistration: Boolean = false,
+    onResult: (Boolean) -> Unit
+) {
     if (context is FragmentActivity) {
-        val executor = ContextCompat.getMainExecutor(context)
-        val biometricPrompt = BiometricPrompt(
-            context,
-            executor,
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    super.onAuthenticationSucceeded(result)
-                    onResult(true)
-                }
+        val title = if (isFirstTimeRegistration) "ثبت بیومتریک گاوصندوق امن" else "احراز هویت بیومتریک پوشه مخفی"
+        val subtitle = if (isFirstTimeRegistration) {
+            "اثر انگشت یا شناسه بیومتریک گوشی خود را تأیید کنید تا گاوصندوق فعال شود"
+        } else {
+            "اثر انگشت خود را روی حسگر قرار دهید یا چهره خود را تأیید کنید"
+        }
 
-                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    super.onAuthenticationError(errorCode, errString)
-                    onResult(false)
-                }
-            }
+        BiometricHelper.authenticate(
+            activity = context,
+            title = title,
+            subtitle = subtitle,
+            onSuccess = { onResult(true) },
+            onError = { _, _ -> onResult(false) },
+            onFailed = { /* Biometric failed, allow retry */ }
         )
-
-        val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("Unlock Secure Vault")
-            .setSubtitle("Confirm your biometric identity to access hidden videos")
-            .setNegativeButtonText("Cancel")
-            .build()
-
-        biometricPrompt.authenticate(promptInfo)
     } else {
         onResult(false)
     }

@@ -52,10 +52,11 @@ class Phase2SnifferTest {
         val baseUrl = "https://cdn.example.com/video/master.m3u8"
         val qualities = HlsManifestParser.parseManifestContent(sampleManifest, baseUrl)
 
-        assertEquals(3, qualities.size)
+        val videoVariants = qualities.filter { !it.formatTag.contains("AUDIO", ignoreCase = true) }
+        assertEquals(3, videoVariants.size)
 
         // Sorted descending by bandwidth
-        val highest = qualities[0]
+        val highest = videoVariants[0]
         assertEquals("1920x1080", highest.resolution)
         assertEquals(5000000L, highest.bandwidthBps)
         assertEquals("https://cdn.example.com/video/1080p.m3u8", highest.url)
@@ -91,5 +92,51 @@ class Phase2SnifferTest {
         assertEquals("1.5 KB", VideoQualityOption.formatFileSize(1536))
         assertEquals("25 MB", VideoQualityOption.formatFileSize(26214400))
         assertEquals("1.2 GB", VideoQualityOption.formatFileSize(1288490188))
+    }
+
+    @Test
+    fun testHlsManifestCappingAndDeduplication() {
+        val multiResManifest = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=15000000,RESOLUTION=3840x2160
+            4k_stream.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=2560x1440
+            2k_stream.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+            1080p_high.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1920x1080
+            1080p_low.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+            720p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480
+            480p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=640x360
+            360p.m3u8
+        """.trimIndent()
+
+        val baseUrl = "https://cdn.example.com/master.m3u8"
+        val parsed = HlsManifestParser.parseManifestContent(multiResManifest, baseUrl)
+
+        val videoOptions = parsed.filter { !it.formatTag.contains("AUDIO", ignoreCase = true) }
+        val audioOptions = parsed.filter { it.formatTag.contains("AUDIO", ignoreCase = true) }
+
+        // Must have at most 4 standard video tiers: 1080p, 720p, 480p, 360p
+        assertEquals(4, videoOptions.size)
+        assertEquals(1, audioOptions.size)
+
+        // 1080p tier should have kept the highest bandwidth variant (from 4K/2K/1080p high)
+        val highest = videoOptions[0]
+        assertEquals("1920x1080", highest.resolution)
+        assertEquals(15000000L, highest.bandwidthBps)
+        assertTrue(highest.cleanResolutionBadge.contains("1080p"))
+        assertFalse(highest.cleanResolutionBadge.contains("4K"))
+        assertFalse(highest.cleanResolutionBadge.contains("2K"))
+
+        // Verify all clean badges
+        val badges = videoOptions.map { it.cleanResolutionBadge }
+        assertTrue(badges.contains("1080p FHD"))
+        assertTrue(badges.contains("720p HD"))
+        assertTrue(badges.contains("480p SD"))
+        assertTrue(badges.contains("360p Low"))
     }
 }

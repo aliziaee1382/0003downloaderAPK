@@ -1,6 +1,8 @@
 package ir.ali0003.downloader
 
+import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -14,9 +16,11 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine
 import ir.ali0003.downloader.browser.viewmodel.BrowserViewModel
 import ir.ali0003.downloader.ui.navigation.MainAppNavigation
 import ir.ali0003.downloader.ui.viewmodel.MainViewModel
+import ir.ali0003.downloader.util.IntentUrlExtractor
 
 class MainActivity : FragmentActivity() {
 
@@ -50,6 +54,9 @@ class MainActivity : FragmentActivity() {
             }
         })
 
+        // Handle incoming shared links or deep links from external apps (YouTube, Instagram, etc.)
+        handleIncomingIntent(intent)
+
         setContent {
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                 MainAppNavigation(
@@ -59,6 +66,29 @@ class MainActivity : FragmentActivity() {
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        val sharedUrl = IntentUrlExtractor.extractUrl(intent) ?: return
+
+        // Switch user focus cleanly to the In-App Browser (Tab 0)
+        viewModel.setSelectedTab(0)
+
+        // Forward the URL directly to BrowserViewModel
+        browserViewModel.navigateToUrl(sharedUrl)
+
+        // If it's a direct stream or media file, trigger media inspection immediately
+        if (VideoSnifferEngine.isDirectMediaUrl(sharedUrl)) {
+            browserViewModel.snifferEngine.inspectUrl(sharedUrl, pageTitle = "Shared Media")
+        }
+
+        Toast.makeText(this, "Shared link opened in browser", Toast.LENGTH_SHORT).show()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

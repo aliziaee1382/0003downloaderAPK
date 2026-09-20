@@ -8,6 +8,7 @@ import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.data.model.DownloadStatus
 import ir.ali0003.downloader.data.repository.DownloadRepository
 import ir.ali0003.downloader.data.repository.DownloadRepositoryImpl
+import ir.ali0003.downloader.data.settings.DownloadSettingsPreferences
 import ir.ali0003.downloader.data.vault.VaultFileManager
 import ir.ali0003.downloader.data.vault.VaultManager
 import ir.ali0003.downloader.data.theme.ThemePreferences
@@ -32,6 +33,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val vaultFileManager: VaultFileManager = VaultFileManager(application, database.downloadDao())
     val downloadController: DownloadManagerController = DownloadManagerController.getInstance(application)
     val themePreferences: ThemePreferences = ThemePreferences(application)
+    val downloadSettingsPreferences: DownloadSettingsPreferences = DownloadSettingsPreferences.getInstance(application)
+
+    // Acceleration Segment Threads State
+    val threadCount: StateFlow<Int> = downloadSettingsPreferences.threadCount
+    val isMultiSegmentEnabled: StateFlow<Boolean> = downloadSettingsPreferences.isMultiSegmentEnabled
+    val isBiometricRegistered: Boolean get() = vaultManager.isBiometricRegistered()
 
     // Real-time task progress map from DownloadManagerController
     val taskProgressMap: StateFlow<Map<Long, DownloadProgress>> = downloadController.taskProgressMap
@@ -189,11 +196,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun registerBiometricAndUnlock() {
+        vaultManager.markBiometricRegistered()
+        _pinInput.value = ""
+        _pinErrorMessage.value = null
+        _showVaultAuthDialog.value = false
+    }
+
     fun unlockWithBiometrics() {
         vaultManager.unlockWithBiometrics()
         _pinInput.value = ""
         _pinErrorMessage.value = null
         _showVaultAuthDialog.value = false
+    }
+
+    fun setThreadCount(count: Int) {
+        downloadSettingsPreferences.setThreadCount(count)
+    }
+
+    fun setMultiSegmentEnabled(enabled: Boolean) {
+        downloadSettingsPreferences.setMultiSegmentEnabled(enabled)
     }
 
     fun lockVault() {
@@ -227,10 +249,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Manually enqueues a download task from a pasted direct URL.
+     */
+    fun enqueueManualDownload(url: String, isHidden: Boolean, customFileName: String? = null) {
+        viewModelScope.launch {
+            val cleanUrl = url.trim()
+            val isM3u8 = cleanUrl.contains(".m3u8", ignoreCase = true)
+            val fileName = if (!customFileName.isNullOrBlank()) {
+                val custom = customFileName.trim()
+                if (isM3u8 && custom.endsWith(".m3u8", ignoreCase = true)) {
+                    "${custom.removeSuffix(".m3u8").removeSuffix(".M3U8")}.mp4"
+                } else custom
+            } else {
+                val path = cleanUrl.substringBefore('?').substringBefore('#')
+                var rawName = path.substringAfterLast('/').ifBlank { "media_${System.currentTimeMillis()}" }
+                if (rawName.endsWith(".m3u8", ignoreCase = true)) {
+                    rawName = rawName.removeSuffix(".m3u8").removeSuffix(".M3U8")
+                }
+                if (!rawName.contains('.')) {
+                    "$rawName.mp4"
+                } else rawName
+            }
+            val mimeType = "video/mp4"
+
+            repository.enqueueDownload(
+                url = cleanUrl,
+                websiteUrl = cleanUrl,
+                fileName = fileName,
+                mimeType = mimeType,
+                totalBytes = 0L,
+                isM3u8 = isM3u8,
+                headersJson = "{\"User-Agent\":\"VideoVault/1.0\"}",
+                isHidden = isHidden
+            )
+        }
+    }
+
     fun addDemoDownload(isHidden: Boolean = false) {
         viewModelScope.launch {
             val sampleFiles = listOf(
                 Triple("4K_Neon_Cyberpunk_City.mp4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4", 1024L * 1024L * 85L),
+                Triple("DASH_1080p_AV_Mux.mp4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4|https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4", 1024L * 1024L * 30L),
                 Triple("Deep_Sea_Bioluminescence_1080p.mp4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4", 1024L * 1024L * 42L),
                 Triple("Space_Nebula_Stream.m3u8", "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", 1024L * 1024L * 128L),
                 Triple("Confidential_Security_Report.mp4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4", 1024L * 1024L * 25L)

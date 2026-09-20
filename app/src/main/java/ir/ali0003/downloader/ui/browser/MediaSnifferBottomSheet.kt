@@ -1,11 +1,5 @@
 package ir.ali0003.downloader.ui.browser
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,27 +8,30 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.OndemandVideo
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -51,13 +48,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import ir.ali0003.downloader.browser.model.SniffedMediaItem
 import ir.ali0003.downloader.browser.model.VideoQualityOption
 import ir.ali0003.downloader.ui.glass.GlassBox
@@ -66,48 +69,27 @@ import ir.ali0003.downloader.ui.glass.GlassIconButton
 import ir.ali0003.downloader.ui.glass.GlassTheme
 import java.net.URI
 
-enum class SnifferStep {
-    SOURCE_SELECTION,
-    QUALITY_SELECTION
-}
-
 /**
- * Production Two-Step Media Sniffer BottomSheet:
- * - State A: Video Source Selector (Filters out junk/ads, shows duration, domain, and format).
- * - State B: Quality & Format Selector (Itemized resolutions, estimated sizes, Vault toggle, download trigger).
+ * InShot-style Single-Step Media Sniffer Quality Sheet:
+ * - Large video thumbnail preview with duration badge
+ * - Editable title (rename video before downloading)
+ * - Clean multi-tier resolution picker (1080p, 720p, 480p, 360p, MP3) with exact calculated sizes
+ * - Instant 1-tap download or prominent master Download action button
+ * - Save to Encrypted Vault toggle
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaSnifferBottomSheet(
     sniffedMediaList: List<SniffedMediaItem>,
     initialSelectedItem: SniffedMediaItem? = null,
+    isExtracting: Boolean = false,
     saveToVault: Boolean = false,
     onToggleSaveToVault: (Boolean) -> Unit = {},
     onDismiss: () -> Unit,
     onConfirmDownload: (SniffedMediaItem, VideoQualityOption?) -> Unit,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 ) {
-    // 1. Filter out junk assets (ads, tracking beacons, clips < 5s, tiny previews < 50KB)
-    val validMediaItems = remember(sniffedMediaList) {
-        filterJunkMedia(sniffedMediaList)
-    }
-
-    var selectedMedia by remember(initialSelectedItem, validMediaItems) {
-        mutableStateOf(initialSelectedItem ?: validMediaItems.firstOrNull())
-    }
-
-    var currentStep by remember(initialSelectedItem, validMediaItems) {
-        mutableStateOf(
-            if (initialSelectedItem != null) {
-                SnifferStep.QUALITY_SELECTION
-            } else if (validMediaItems.size == 1) {
-                // If exactly 1 media detected, jump straight to quality selection with back affordance
-                SnifferStep.QUALITY_SELECTION
-            } else {
-                SnifferStep.SOURCE_SELECTION
-            }
-        )
-    }
+    val mediaItem = initialSelectedItem ?: sniffedMediaList.firstOrNull()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -124,362 +106,61 @@ fun MediaSnifferBottomSheet(
             )
         }
     ) {
-        AnimatedContent(
-            targetState = currentStep,
-            transitionSpec = {
-                if (targetState == SnifferStep.QUALITY_SELECTION) {
-                    (slideInHorizontally { width -> width } + fadeIn()).togetherWith(
-                        slideOutHorizontally { width -> -width } + fadeOut()
-                    )
-                } else {
-                    (slideInHorizontally { width -> -width } + fadeIn()).togetherWith(
-                        slideOutHorizontally { width -> width } + fadeOut()
-                    )
-                }
-            },
-            label = "SnifferStepTransition"
-        ) { step ->
-            when (step) {
-                SnifferStep.SOURCE_SELECTION -> {
-                    StateASourceSelector(
-                        mediaList = validMediaItems,
-                        onSelectVideo = { item ->
-                            selectedMedia = item
-                            currentStep = SnifferStep.QUALITY_SELECTION
-                        },
-                        onDismiss = onDismiss
-                    )
-                }
-                SnifferStep.QUALITY_SELECTION -> {
-                    val currentItem = selectedMedia ?: validMediaItems.firstOrNull()
-                    if (currentItem != null) {
-                        StateBQualitySelector(
-                            mediaItem = currentItem,
-                            hasMultipleSources = validMediaItems.size > 1,
-                            saveToVault = saveToVault,
-                            onToggleSaveToVault = onToggleSaveToVault,
-                            onBackToSources = {
-                                currentStep = SnifferStep.SOURCE_SELECTION
-                            },
-                            onDismiss = onDismiss,
-                            onConfirmDownload = { item, quality ->
-                                onConfirmDownload(item, quality)
-                                onDismiss()
-                            }
-                        )
-                    } else {
-                        // Fallback if no media item is available
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "No media stream selected",
-                                color = GlassTheme.colors.textSecondary
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * STATE A: Video Source Selector
- */
-@Composable
-private fun StateASourceSelector(
-    mediaList: List<SniffedMediaItem>,
-    onSelectVideo: (SniffedMediaItem) -> Unit,
-    onDismiss: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .testTag("sniffer_state_a_sources")
-    ) {
-        // Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(GlassTheme.colors.accentGlow.copy(alpha = 0.18f))
-                        .border(1.2.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.6f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.OndemandVideo,
-                        contentDescription = null,
-                        tint = GlassTheme.colors.accentGlow,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                Column {
-                    Text(
-                        text = "DETECTED MEDIA (${mediaList.size})",
-                        color = GlassTheme.colors.accentGlow,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp
-                    )
-                    Text(
-                        text = "Select a video source to inspect qualities",
-                        color = GlassTheme.colors.textPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-
-            GlassIconButton(
-                icon = Icons.Default.Close,
-                onClick = onDismiss,
-                size = 32.dp,
-                iconSize = 16.dp,
-                contentDescription = "Close Sniffer"
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (mediaList.isEmpty()) {
-            GlassBox(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                backgroundColor = GlassTheme.colors.surfaceGlassSubtle,
-                borderColor = GlassTheme.colors.glassBorder
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.OndemandVideo,
-                        contentDescription = null,
-                        tint = GlassTheme.colors.textMuted,
-                        modifier = Modifier.size(32.dp)
-                    )
-                    Text(
-                        text = "No downloadable videos detected yet",
-                        color = GlassTheme.colors.textPrimary,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "Play a video on the page to automatically capture the stream.",
-                        color = GlassTheme.colors.textSecondary,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(300.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                items(mediaList) { item ->
-                    VideoSourceCard(
-                        item = item,
-                        onClick = { onSelectVideo(item) }
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-    }
-}
-
-/**
- * Individual Detected Video Source Card in State A
- */
-@Composable
-private fun VideoSourceCard(
-    item: SniffedMediaItem,
-    onClick: () -> Unit
-) {
-    val domain = remember(item) {
-        extractCleanDomain(item.pageUrl.ifBlank { item.url })
-    }
-
-    val formatBadgeText = remember(item) {
         when {
-            item.isM3u8 -> "HLS Stream"
-            item.isDash -> "DASH Stream"
-            item.mimeType.contains("webm", ignoreCase = true) -> "WEBM"
-            item.mimeType.contains("audio", ignoreCase = true) -> "AUDIO"
-            else -> "MP4 Video"
-        }
-    }
-
-    val durationText = remember(item.durationSeconds) {
-        formatDurationString(item.durationSeconds)
-    }
-
-    val sizeText = remember(item.fileSizeBytes) {
-        if (item.fileSizeBytes > 0) VideoQualityOption.formatFileSize(item.fileSizeBytes) else null
-    }
-
-    GlassBox(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(14.dp),
-        backgroundColor = GlassTheme.colors.surfaceGlassSubtle.copy(alpha = 0.6f),
-        borderColor = GlassTheme.colors.glassBorder
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Video Icon / Thumbnail Indicator
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(
-                                GlassTheme.colors.accentGlow.copy(alpha = 0.25f),
-                                GlassTheme.colors.secondaryGlow.copy(alpha = 0.15f)
-                            )
-                        )
-                    )
-                    .border(1.dp, GlassTheme.colors.glassBorder, RoundedCornerShape(10.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (item.mimeType.contains("audio")) Icons.Default.Audiotrack else Icons.Default.PlayArrow,
-                    contentDescription = null,
-                    tint = GlassTheme.colors.accentGlow,
-                    modifier = Modifier.size(22.dp)
+            mediaItem != null -> {
+                DirectQualitySheetContent(
+                    mediaItem = mediaItem,
+                    saveToVault = saveToVault,
+                    onToggleSaveToVault = onToggleSaveToVault,
+                    onDismiss = onDismiss,
+                    onConfirmDownload = onConfirmDownload
                 )
             }
-
-            // Title, Domain & Format Badges
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = item.displayTitle,
-                    color = GlassTheme.colors.textPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    // Format Pill
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(GlassTheme.colors.accentGlow.copy(alpha = 0.15f))
-                            .border(0.8.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = formatBadgeText,
-                            color = GlassTheme.colors.accentGlow,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    // Domain
-                    if (domain.isNotBlank()) {
-                        Text(
-                            text = domain,
-                            color = GlassTheme.colors.textSecondary,
-                            fontSize = 11.sp
-                        )
-                    }
-
-                    // Duration or Size
-                    if (durationText.isNotBlank()) {
-                        Text(
-                            text = "• $durationText",
-                            color = GlassTheme.colors.textMuted,
-                            fontSize = 11.sp
-                        )
-                    } else if (sizeText != null) {
-                        Text(
-                            text = "• $sizeText",
-                            color = GlassTheme.colors.textMuted,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
+            isExtracting -> {
+                ExtractingMediaSnifferContent()
             }
-
-            // Forward Chevron
-            Icon(
-                imageVector = Icons.Default.ChevronRight,
-                contentDescription = "Inspect Qualities",
-                tint = GlassTheme.colors.accentGlow,
-                modifier = Modifier.size(20.dp)
-            )
+            else -> {
+                EmptyMediaSnifferContent(onDismiss = onDismiss)
+            }
         }
     }
 }
 
-/**
- * STATE B: Quality & Format Selector
- */
 @Composable
-private fun StateBQualitySelector(
+private fun DirectQualitySheetContent(
     mediaItem: SniffedMediaItem,
-    hasMultipleSources: Boolean,
     saveToVault: Boolean,
     onToggleSaveToVault: (Boolean) -> Unit,
-    onBackToSources: () -> Unit,
     onDismiss: () -> Unit,
     onConfirmDownload: (SniffedMediaItem, VideoQualityOption?) -> Unit
 ) {
-    // Generate resolution tiers if none are provided
+    val haptic = LocalHapticFeedback.current
+
     val qualityOptions = remember(mediaItem) {
-        resolveComprehensiveQualities(mediaItem)
+        if (mediaItem.qualities.isNotEmpty()) {
+            mediaItem.qualities
+        } else {
+            resolveComprehensiveQualities(mediaItem)
+        }
     }
 
-    var selectedQuality by remember(mediaItem, qualityOptions) {
+    var selectedOption by remember(qualityOptions) {
         mutableStateOf(qualityOptions.firstOrNull())
     }
+
+    var editedTitle by remember(mediaItem.id) {
+        mutableStateOf(mediaItem.displayTitle)
+    }
+    var isEditingTitle by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            .testTag("sniffer_state_b_qualities")
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 6.dp)
+            .testTag("direct_quality_sheet")
     ) {
-        // Top Header: Back Button + Selected Video Title + Close Button
+        // 1. Header: Ready eyebrow + Close Button
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -487,35 +168,21 @@ private fun StateBQualitySelector(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.weight(1f)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // Back button if multiple sources exist, or as general back navigation
-                GlassIconButton(
-                    icon = Icons.AutoMirrored.Filled.ArrowBack,
-                    onClick = onBackToSources,
-                    size = 36.dp,
-                    iconSize = 18.dp,
-                    contentDescription = "Back to Sources"
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(GlassTheme.colors.accentGlow)
                 )
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "SELECT QUALITY & FORMAT",
-                        color = GlassTheme.colors.accentGlow,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp
-                    )
-                    Text(
-                        text = mediaItem.displayTitle,
-                        color = GlassTheme.colors.textPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Text(
+                    text = "READY TO DOWNLOAD",
+                    color = GlassTheme.colors.accentGlow,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                )
             }
 
             GlassIconButton(
@@ -527,81 +194,209 @@ private fun StateBQualitySelector(
             )
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // Video Domain & Format Header Banner
+        // 2. Video Preview Card: Thumbnail + Editable Title + Source Domain
         GlassBox(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            backgroundColor = GlassTheme.colors.surfaceGlassSubtle.copy(alpha = 0.7f),
+            shape = RoundedCornerShape(14.dp),
+            backgroundColor = GlassTheme.colors.surfaceGlassSubtle,
             borderColor = GlassTheme.colors.glassBorder
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                    .padding(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                // Video Thumbnail with Duration Overlay
+                Box(
+                    modifier = Modifier
+                        .width(96.dp)
+                        .height(64.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(GlassTheme.colors.surfaceGlass)
+                        .border(
+                            0.8.dp,
+                            GlassTheme.colors.glassBorderHighlight.copy(alpha = 0.4f),
+                            RoundedCornerShape(10.dp)
+                        ),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.HighQuality,
-                        contentDescription = null,
-                        tint = GlassTheme.colors.accentGlow,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = extractCleanDomain(mediaItem.pageUrl.ifBlank { mediaItem.url }),
-                        color = GlassTheme.colors.textSecondary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    if (!mediaItem.thumbnailUrl.isNullOrBlank()) {
+                        AsyncImage(
+                            model = mediaItem.thumbnailUrl,
+                            contentDescription = "Video Thumbnail",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Icon(
+                            imageVector = if (mediaItem.mimeType.contains("audio", true)) Icons.Default.Audiotrack else Icons.Default.OndemandVideo,
+                            contentDescription = null,
+                            tint = GlassTheme.colors.accentGlow.copy(alpha = 0.8f),
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+
+                    // Duration Badge overlay
+                    val durStr = formatDurationString(mediaItem.durationSeconds)
+                    if (durStr.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(4.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.Black.copy(alpha = 0.75f))
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = durStr,
+                                color = Color.White,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
                 }
 
-                Text(
-                    text = if (mediaItem.isM3u8) "HLS Adaptive Stream" else "Direct Video",
-                    color = GlassTheme.colors.accentGlow,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                // Title + Editable inline + Metadata Row
+                Column(
+                    modifier = Modifier.weight(1f)
+                ) {
+                    if (isEditingTitle) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            BasicTextField(
+                                value = editedTitle,
+                                onValueChange = { editedTitle = it },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .background(GlassTheme.colors.surfaceGlass, RoundedCornerShape(6.dp))
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    .testTag("edit_title_input"),
+                                textStyle = TextStyle(
+                                    color = GlassTheme.colors.textPrimary,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                ),
+                                singleLine = true,
+                                cursorBrush = SolidColor(GlassTheme.colors.accentGlow)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(GlassTheme.colors.accentGlow)
+                                    .clickable { isEditingTitle = false },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Save Title",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = editedTitle,
+                                color = GlassTheme.colors.textPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Rename Video",
+                                tint = GlassTheme.colors.accentGlow,
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(CircleShape)
+                                    .clickable { isEditingTitle = true }
+                                    .padding(3.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = extractCleanDomain(mediaItem.pageUrl.ifBlank { mediaItem.url }),
+                            color = GlassTheme.colors.textSecondary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = "•",
+                            color = GlassTheme.colors.textMuted,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            text = if (mediaItem.isM3u8) "HLS Adaptive" else "MP4 Direct",
+                            color = GlassTheme.colors.accentGlow,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
             }
         }
 
         Spacer(modifier = Modifier.height(14.dp))
 
         Text(
-            text = "AVAILABLE RESOLUTIONS",
-            color = GlassTheme.colors.textSecondary,
-            fontSize = 11.sp,
+            text = "SELECT RESOLUTION",
+            color = GlassTheme.colors.textMuted,
+            fontSize = 10.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 0.6.sp
+            letterSpacing = 0.8.sp
         )
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Itemized Resolution Cards List
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(175.dp),
+        // 3. Quality Options List (InShot Style: Radio Selection + 1-Tap Download Option)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(qualityOptions) { option ->
-                val isSelected = selectedQuality?.url == option.url && selectedQuality?.label == option.label
-                QualityResolutionRowCard(
+            qualityOptions.forEach { option ->
+                val isSelected = option == selectedOption
+                InShotQualityCard(
                     option = option,
                     isSelected = isSelected,
-                    onClick = { selectedQuality = option }
+                    onSelect = {
+                        selectedOption = option
+                    },
+                    onInstantDownload = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
+                        onConfirmDownload(confirmedItem, option)
+                        onDismiss()
+                    }
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Save to Secure Vault Switch Card
+        // 4. Save to Encrypted Vault Toggle
         GlassBox(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -654,54 +449,91 @@ private fun StateBQualitySelector(
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(14.dp))
 
-        // Confirm Download Action Button
-        GlassButton(
-            text = if (saveToVault) "Download to Encrypted Vault" else "Start High-Speed Download",
-            icon = Icons.Default.Download,
-            onClick = {
-                onConfirmDownload(mediaItem, selectedQuality)
-            },
+        // 5. Big Prominent "DOWNLOAD" Action Button
+        val selectedBadge = selectedOption?.cleanResolutionBadge ?: "Best"
+        val selectedSize = selectedOption?.formattedSize ?: ""
+        val downloadButtonText = buildString {
+            append("Download")
+            if (selectedBadge.isNotBlank()) append(" • $selectedBadge")
+            if (selectedSize.isNotBlank()) append(" ($selectedSize)")
+        }
+
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(52.dp),
-            testTag = "confirm_download_button"
-        )
+                .height(52.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(GlassTheme.colors.accentGlow)
+                .clickable {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
+                    onConfirmDownload(confirmedItem, selectedOption)
+                    onDismiss()
+                }
+                .testTag("confirm_download_button"),
+            contentAlignment = Alignment.Center
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = null,
+                    tint = Color.Black,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text = downloadButtonText,
+                    color = Color.Black,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.5.sp
+                )
+            }
+        }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(18.dp))
     }
 }
 
 /**
- * Itemized Quality Resolution Card in State B
+ * Clickable quality card with radio indicator, resolution badge, format, exact size pill, and instant download arrow.
  */
 @Composable
-private fun QualityResolutionRowCard(
+private fun InShotQualityCard(
     option: VideoQualityOption,
     isSelected: Boolean,
-    onClick: () -> Unit
+    onSelect: () -> Unit,
+    onInstantDownload: () -> Unit
 ) {
-    val bg = if (isSelected) {
-        GlassTheme.colors.accentGlow.copy(alpha = 0.20f)
-    } else {
-        GlassTheme.colors.surfaceGlassSubtle.copy(alpha = 0.5f)
-    }
-
-    val border = if (isSelected) {
-        GlassTheme.colors.accentGlow
-    } else {
-        GlassTheme.colors.glassBorder
-    }
+    val isAudio = option.formatTag.contains("AUDIO", ignoreCase = true) ||
+            option.resolution.contains("Audio", ignoreCase = true)
+    val isHighDef = option.cleanResolutionBadge.contains("1080") ||
+            option.cleanResolutionBadge.contains("4K", ignoreCase = true)
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(bg)
-            .border(1.2.dp, border, RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .background(
+                if (isSelected) GlassTheme.colors.accentGlow.copy(alpha = 0.16f)
+                else GlassTheme.colors.surfaceGlassSubtle.copy(alpha = 0.6f)
+            )
+            .border(
+                width = if (isSelected) 1.5.dp else if (isHighDef) 1.dp else 0.7.dp,
+                color = when {
+                    isSelected -> GlassTheme.colors.accentGlow
+                    isHighDef -> GlassTheme.colors.accentGlow.copy(alpha = 0.35f)
+                    else -> GlassTheme.colors.glassBorder
+                },
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable(onClick = onSelect)
             .padding(horizontal = 14.dp, vertical = 10.dp)
+            .testTag("quality_option_${option.cleanResolutionBadge.replace(" ", "_").lowercase()}")
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -710,103 +542,194 @@ private fun QualityResolutionRowCard(
         ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.weight(1f)
             ) {
-                // Radio indicator
+                // Radio Selection Indicator
+                Icon(
+                    imageVector = if (isSelected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                    contentDescription = if (isSelected) "Selected" else "Unselected",
+                    tint = if (isSelected) GlassTheme.colors.accentGlow else GlassTheme.colors.textMuted,
+                    modifier = Modifier.size(20.dp)
+                )
+
+                // Resolution Badge Pill
                 Box(
                     modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .background(if (isSelected) GlassTheme.colors.accentGlow else Color.Transparent)
-                        .border(
-                            1.2.dp,
-                            if (isSelected) GlassTheme.colors.accentGlow else GlassTheme.colors.glassBorder,
-                            CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (isSelected) {
-                        Icon(
-                            imageVector = Icons.Default.Check,
-                            contentDescription = null,
-                            tint = Color.Black,
-                            modifier = Modifier.size(14.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(
+                            if (isAudio) GlassTheme.colors.surfaceGlass
+                            else if (isSelected) GlassTheme.colors.accentGlow.copy(alpha = 0.25f)
+                            else GlassTheme.colors.accentGlow.copy(alpha = 0.14f)
                         )
-                    }
+                        .border(
+                            0.8.dp,
+                            if (isAudio) GlassTheme.colors.glassBorder
+                            else GlassTheme.colors.accentGlow.copy(alpha = 0.5f),
+                            RoundedCornerShape(6.dp)
+                        )
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        text = option.cleanResolutionBadge,
+                        color = if (isAudio) GlassTheme.colors.textPrimary else GlassTheme.colors.accentGlow,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
 
+                // Label & Format Subtitle
                 Column {
+                    Text(
+                        text = option.label,
+                        color = if (isSelected) GlassTheme.colors.textPrimary else GlassTheme.colors.textPrimary.copy(alpha = 0.9f),
+                        fontSize = 13.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = option.label,
-                            color = if (isSelected) GlassTheme.colors.accentGlow else GlassTheme.colors.textPrimary,
-                            fontSize = 13.sp,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold
+                            text = option.formatTag,
+                            color = GlassTheme.colors.textSecondary,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium
                         )
-
-                        if (option.formatTag.isNotBlank()) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(GlassTheme.colors.surfaceGlassSubtle)
-                                    .padding(horizontal = 4.dp, vertical = 1.dp)
-                            ) {
-                                Text(
-                                    text = option.formatTag,
-                                    color = GlassTheme.colors.textSecondary,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                            }
+                        if (option.resolution.isNotBlank() && !isAudio) {
+                            Text(
+                                text = "• ${option.resolution}",
+                                color = GlassTheme.colors.textMuted,
+                                fontSize = 10.sp
+                            )
                         }
-                    }
-
-                    if (option.bandwidthBps > 0) {
-                        Text(
-                            text = option.formattedBandwidth,
-                            color = GlassTheme.colors.textMuted,
-                            fontSize = 10.sp
-                        )
                     }
                 }
             }
 
-            Text(
-                text = option.formattedSize,
-                color = if (isSelected) GlassTheme.colors.textPrimary else GlassTheme.colors.textSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold
-            )
+            // Right side: Exact file size pill + Instant 1-Tap Download arrow
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Exact File Size Pill
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isSelected) GlassTheme.colors.accentGlow.copy(alpha = 0.2f) else GlassTheme.colors.surfaceGlass)
+                        .border(
+                            0.8.dp,
+                            if (isSelected) GlassTheme.colors.accentGlow.copy(alpha = 0.4f) else GlassTheme.colors.glassBorder,
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = option.formattedSize,
+                        color = GlassTheme.colors.textPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                // Instant 1-Tap Download Action Circle
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isSelected) GlassTheme.colors.accentGlow
+                            else GlassTheme.colors.accentGlow.copy(alpha = 0.15f)
+                        )
+                        .clickable(onClick = onInstantDownload)
+                        .border(
+                            0.8.dp,
+                            GlassTheme.colors.accentGlow.copy(alpha = 0.5f),
+                            CircleShape
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = "Instant Download ${option.label}",
+                        tint = if (isSelected) Color.Black else GlassTheme.colors.accentGlow,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
         }
     }
 }
 
-/**
- * Filter out junk/ad assets, clips under 5 seconds, and small thumbnails < 50KB.
- */
-private fun filterJunkMedia(items: List<SniffedMediaItem>): List<SniffedMediaItem> {
-    return items.filter { item ->
-        val urlLower = item.url.lowercase()
-        val titleLower = item.title.lowercase()
+@Composable
+private fun ExtractingMediaSnifferContent() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(44.dp),
+            color = GlassTheme.colors.accentColor,
+            strokeWidth = 3.5.dp
+        )
+        Spacer(modifier = Modifier.height(18.dp))
+        Text(
+            text = "Extracting Video Streams...",
+            color = GlassTheme.colors.textPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "Resolving available resolutions and muxing options with native engine",
+            color = GlassTheme.colors.textSecondary,
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
 
-        // 1. Exclude ad networks & telemetry hosts
-        val isAd = urlLower.contains("doubleclick") || urlLower.contains("/ads/") ||
-                urlLower.contains("googlesyndication") || urlLower.contains("adnxs") ||
-                urlLower.contains("analytics") || urlLower.contains("telemetry") ||
-                urlLower.contains("tracking") || urlLower.contains("beacon") ||
-                urlLower.contains("pixel") || titleLower.contains("advertisement")
-
-        // 2. Exclude clips < 5s if duration is explicitly known and non-zero
-        val isTooShort = item.durationSeconds > 0.0 && item.durationSeconds < 5.0
-
-        // 3. Exclude tiny thumbnail video previews (< 50KB if fileSizeBytes > 0)
-        val isTinyPreview = item.fileSizeBytes in 1..51200L && !item.isM3u8
-
-        !isAd && !isTooShort && !isTinyPreview
-    }.distinctBy { it.url }
+@Composable
+private fun EmptyMediaSnifferContent(onDismiss: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Icon(
+            imageVector = Icons.Default.OndemandVideo,
+            contentDescription = null,
+            tint = GlassTheme.colors.textMuted,
+            modifier = Modifier.size(48.dp)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = "No Video Stream Detected Yet",
+            color = GlassTheme.colors.textPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "Play a video on this webpage or refresh to trigger automatic media detection.",
+            color = GlassTheme.colors.textSecondary,
+            fontSize = 12.sp,
+            textAlign = TextAlign.Center
+        )
+        Spacer(modifier = Modifier.height(18.dp))
+        GlassButton(
+            text = "Dismiss",
+            onClick = onDismiss,
+            modifier = Modifier.fillMaxWidth(0.5f)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+    }
 }
 
 /**
@@ -817,7 +740,7 @@ private fun extractCleanDomain(url: String): String {
         val uri = URI(url)
         val host = uri.host ?: ""
         if (host.startsWith("www.")) host.substring(4) else host
-    } catch (e: Exception) {
+    } catch (_: Exception) {
         url.substringAfter("://").substringBefore("/").removePrefix("www.")
     }
 }
@@ -842,96 +765,119 @@ private fun formatDurationString(seconds: Double): String {
  * Build rich resolution quality options for a given SniffedMediaItem
  */
 private fun resolveComprehensiveQualities(item: SniffedMediaItem): List<VideoQualityOption> {
-    if (item.qualities.isNotEmpty()) {
-        return item.qualities
-    }
+    val baseSize = item.bestFileSizeBytes
+    val duration = item.durationSeconds
 
-    val baseSize = item.fileSizeBytes
+    if (item.qualities.isNotEmpty()) {
+        return item.qualities.map { opt ->
+            if (opt.estimatedSizeBytes <= 0L) {
+                val computed = if (opt.bandwidthBps > 0L && duration > 0.0) {
+                    ((opt.bandwidthBps * duration) / 8.0).toLong()
+                } else if (opt.bandwidthBps > 0L) {
+                    (opt.bandwidthBps * 180L) / 8L
+                } else {
+                    baseSize
+                }
+                opt.copy(estimatedSizeBytes = computed)
+            } else {
+                opt
+            }
+        }
+    }
 
     return if (item.isM3u8) {
         listOf(
             VideoQualityOption(
-                label = "1080p FHD (Adaptive Stream)",
+                label = "1080p Full HD (Source)",
                 resolution = "1920x1080",
-                bandwidthBps = 6000000L,
+                bandwidthBps = 5_500_000L,
                 url = item.url,
                 isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) baseSize else 85 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) baseSize else 68 * 1024 * 1024L,
                 formatTag = "HLS"
             ),
             VideoQualityOption(
-                label = "720p HD (Adaptive Stream)",
+                label = "720p High Definition",
                 resolution = "1280x720",
-                bandwidthBps = 3200000L,
+                bandwidthBps = 2_800_000L,
                 url = item.url,
                 isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.6).toLong() else 45 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.60).toLong() else 38 * 1024 * 1024L,
                 formatTag = "HLS"
             ),
             VideoQualityOption(
-                label = "480p SD (Adaptive Stream)",
+                label = "480p Standard Definition",
                 resolution = "854x480",
-                bandwidthBps = 1500000L,
+                bandwidthBps = 1_200_000L,
                 url = item.url,
                 isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.35).toLong() else 22 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.35).toLong() else 19 * 1024 * 1024L,
                 formatTag = "HLS"
             ),
             VideoQualityOption(
-                label = "Audio Track Only (M4A)",
-                resolution = "Audio",
-                bandwidthBps = 128000L,
+                label = "360p Low Quality",
+                resolution = "640x360",
+                bandwidthBps = 600_000L,
                 url = item.url,
                 isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.1).toLong() else 5 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.20).toLong() else 10 * 1024 * 1024L,
+                formatTag = "HLS"
+            ),
+            VideoQualityOption(
+                label = "Audio Only (MP3/M4A)",
+                resolution = "Audio Only",
+                bandwidthBps = 128_000L,
+                url = item.url,
+                isHlsVariant = true,
+                estimatedSizeBytes = if (duration > 0.0) ((128_000L * duration) / 8.0).toLong() else 4 * 1024 * 1024L,
                 formatTag = "AUDIO"
             )
         )
     } else {
         listOf(
             VideoQualityOption(
-                label = "1080p Full HD",
+                label = "1080p Full HD (Source)",
                 resolution = "1920x1080",
-                bandwidthBps = 6000000L,
+                bandwidthBps = 5_000_000L,
                 url = item.url,
                 isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) baseSize else 65 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) baseSize else 52 * 1024 * 1024L,
                 formatTag = "MP4"
             ),
             VideoQualityOption(
                 label = "720p High Definition",
                 resolution = "1280x720",
-                bandwidthBps = 3200000L,
+                bandwidthBps = 2_800_000L,
                 url = item.url,
                 isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.65).toLong() else 35 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.60).toLong() else 32 * 1024 * 1024L,
                 formatTag = "MP4"
             ),
             VideoQualityOption(
                 label = "480p Standard Definition",
                 resolution = "854x480",
-                bandwidthBps = 1500000L,
+                bandwidthBps = 1_200_000L,
                 url = item.url,
                 isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.4).toLong() else 18 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.35).toLong() else 18 * 1024 * 1024L,
                 formatTag = "MP4"
             ),
             VideoQualityOption(
-                label = "360p Data Saver",
+                label = "360p Low Quality",
                 resolution = "640x360",
-                bandwidthBps = 800000L,
+                bandwidthBps = 600_000L,
                 url = item.url,
                 isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.25).toLong() else 10 * 1024 * 1024L,
+                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.20).toLong() else 9 * 1024 * 1024L,
                 formatTag = "MP4"
             ),
             VideoQualityOption(
-                label = "Audio Track Extract (MP3/M4A)",
-                resolution = "Audio",
-                bandwidthBps = 128000L,
+                label = "Audio Only (MP3/M4A)",
+                resolution = "Audio Only",
+                bandwidthBps = 128_000L,
                 url = item.url,
                 isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.12).toLong() else 4 * 1024 * 1024L,
+                estimatedSizeBytes = if (duration > 0.0) ((128_000L * duration) / 8.0).toLong() else 4 * 1024 * 1024L,
                 formatTag = "AUDIO"
             )
         )

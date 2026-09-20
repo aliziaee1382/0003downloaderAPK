@@ -38,6 +38,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +53,7 @@ import androidx.compose.ui.unit.sp
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.data.model.DownloadStatus
 import ir.ali0003.downloader.downloader.model.DownloadProgress
+import ir.ali0003.downloader.ui.dialogs.ManualDownloadUrlDialog
 import ir.ali0003.downloader.ui.glass.GlassBadge
 import ir.ali0003.downloader.ui.glass.GlassBox
 import ir.ali0003.downloader.ui.glass.GlassButton
@@ -64,12 +68,16 @@ import ir.ali0003.downloader.ui.glass.GlassTheme
 fun ActiveDownloadsScreen(
     downloads: List<DownloadTaskEntity>,
     progressMap: Map<Long, DownloadProgress> = emptyMap(),
-    onAddDownload: () -> Unit,
+    onAddDownload: () -> Unit = {},
+    onEnqueueDirect: (url: String, isHidden: Boolean) -> Unit = { _, _ -> },
+    onInspectInBrowser: (url: String, isHidden: Boolean) -> Unit = { _, _ -> },
     onTogglePause: (DownloadTaskEntity) -> Unit,
     onToggleVault: (DownloadTaskEntity) -> Unit,
     onDelete: (DownloadTaskEntity) -> Unit,
     onSimulate: () -> Unit
 ) {
+    var showManualDialog by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -85,7 +93,7 @@ fun ActiveDownloadsScreen(
             GlassButton(
                 text = "+ Add Task",
                 icon = Icons.Default.Add,
-                onClick = onAddDownload,
+                onClick = { showManualDialog = true },
                 modifier = Modifier.weight(1f),
                 testTag = "add_download_button"
             )
@@ -122,6 +130,19 @@ fun ActiveDownloadsScreen(
                     )
                 }
             }
+        }
+
+        // Manual "Paste Link & Download" Frosted Dialog
+        if (showManualDialog) {
+            ManualDownloadUrlDialog(
+                onDismiss = { showManualDialog = false },
+                onEnqueueDirect = { url, isHidden ->
+                    onEnqueueDirect(url, isHidden)
+                },
+                onInspectInBrowser = { url, isHidden ->
+                    onInspectInBrowser(url, isHidden)
+                }
+            )
         }
     }
 }

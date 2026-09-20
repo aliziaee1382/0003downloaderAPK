@@ -6,6 +6,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import ir.ali0003.downloader.browser.model.SniffedMediaItem
 import ir.ali0003.downloader.browser.model.VideoQualityOption
+import ir.ali0003.downloader.browser.sniffer.ExtractedVideoResult
+import ir.ali0003.downloader.browser.sniffer.LocalVideoExtractor
 import ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine
 import ir.ali0003.downloader.data.local.AppDatabase
 import ir.ali0003.downloader.data.local.WebShortcutEntity
@@ -13,12 +15,15 @@ import ir.ali0003.downloader.data.repository.DownloadRepository
 import ir.ali0003.downloader.data.repository.DownloadRepositoryImpl
 import ir.ali0003.downloader.data.repository.ShortcutRepository
 import ir.ali0003.downloader.data.repository.ShortcutRepositoryImpl
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 data class WebShortcut(
     val title: String,
@@ -94,6 +99,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _currentUrl = MutableStateFlow("")
     val currentUrl: StateFlow<String> = _currentUrl.asStateFlow()
 
+    private val _lastActiveUrl = MutableStateFlow<String?>(null)
+    val lastActiveUrl: StateFlow<String?> = _lastActiveUrl.asStateFlow()
+
+    private val _lastActiveTitle = MutableStateFlow<String?>(null)
+    val lastActiveTitle: StateFlow<String?> = _lastActiveTitle.asStateFlow()
+
     private val _inputUrl = MutableStateFlow("")
     val inputUrl: StateFlow<String> = _inputUrl.asStateFlow()
 
@@ -148,16 +159,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val downloadToastMessage: StateFlow<String?> = _downloadToastMessage.asStateFlow()
 
     // Sniffer Engine instance
-    val snifferEngine = VideoSnifferEngine { detectedItem ->
+    val snifferEngine = VideoSnifferEngine { detectedCanonical ->
         viewModelScope.launch {
-            val currentList = _sniffedMediaList.value.toMutableList()
-            val existingIndex = currentList.indexOfFirst { it.url == detectedItem.url }
-            if (existingIndex >= 0) {
-                currentList[existingIndex] = detectedItem
-            } else {
-                currentList.add(0, detectedItem)
+            val current = _sniffedMediaList.value
+            val hasRichNativeMedia = current.any { it.qualities.any { q -> q.isYoutubeDl } }
+            if (!hasRichNativeMedia) {
+                _sniffedMediaList.value = listOf(detectedCanonical)
+                _selectedMedia.value = detectedCanonical
             }
-            _sniffedMediaList.value = currentList
         }
     }
 
@@ -185,15 +194,32 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _isBrowserHome.value = false
         _inputUrl.value = processed
         _currentUrl.value = processed
+        _lastActiveUrl.value = processed
         clearSniffedMedia()
+        if (!processed.contains("google.com/search")) {
+            extractMediaWithNativeEngine(processed)
+        }
     }
 
     fun resetToHome() {
+        val active = _currentUrl.value.ifBlank { _inputUrl.value }
+        if (active.isNotBlank()) {
+            _lastActiveUrl.value = active
+            _lastActiveTitle.value = _pageTitle.value
+        }
         _isBrowserHome.value = true
         _inputUrl.value = ""
         _currentUrl.value = ""
         _pageTitle.value = "Downloader"
         clearSniffedMedia()
+    }
+
+    fun restorePreviousSession(fallbackUrl: String = "https://m.youtube.com"): String {
+        val targetUrl = _lastActiveUrl.value?.takeIf { it.isNotBlank() }
+            ?: _history.value.firstOrNull()?.url
+            ?: fallbackUrl
+        navigateToUrl(targetUrl)
+        return targetUrl
     }
 
     fun onPageStarted(url: String) {
@@ -213,6 +239,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _pageTitle.value = currentTitle
         _canGoBack.value = canBack
         _canGoForward.value = canForward
+        _lastActiveUrl.value = url
+        _lastActiveTitle.value = currentTitle
         snifferEngine.updateCurrentPageInfo(url, currentTitle)
 
         // Record History Entry
@@ -221,6 +249,37 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         historyList.removeAll { it.url == url }
         historyList.add(0, entry)
         _history.value = historyList.take(50)
+
+        // Trigger LocalVideoExtractor for robust native extraction
+        extractMediaWithNativeEngine(url)
+    }
+
+    private var nativeExtractionJob: Job? = null
+    private val _isExtractingNativeMedia = MutableStateFlow(false)
+    val isExtractingNativeMedia: StateFlow<Boolean> = _isExtractingNativeMedia.asStateFlow()
+
+    fun extractMediaWithNativeEngine(url: String) {
+        if (!LocalVideoExtractor.shouldAttemptExtraction(url)) return
+
+        nativeExtractionJob?.cancel()
+        nativeExtractionJob = viewModelScope.launch(Dispatchers.IO) {
+            _isExtractingNativeMedia.value = true
+            try {
+                when (val result = LocalVideoExtractor.extractMediaInfo(url)) {
+                    is ExtractedVideoResult.Success -> {
+                        _sniffedMediaList.value = listOf(result.sniffedMediaItem)
+                        _selectedMedia.value = result.sniffedMediaItem
+                    }
+                    is ExtractedVideoResult.Error -> {
+                        // Fallback remains with whatever webview intercepted, or clean empty
+                    }
+                }
+            } catch (_: Exception) {
+                // Ignore cancellation or exceptions safely
+            } finally {
+                _isExtractingNativeMedia.value = false
+            }
+        }
     }
 
     fun onProgressChanged(progress: Int) {
@@ -262,6 +321,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun clearSniffedMedia() {
+        nativeExtractionJob?.cancel()
+        _isExtractingNativeMedia.value = false
         _sniffedMediaList.value = emptyList()
         _selectedMedia.value = null
         snifferEngine.resetSession()
@@ -282,23 +343,55 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             val downloadUrl = selectedQuality?.url ?: mediaItem.url
             val isM3u8 = mediaItem.isM3u8 || selectedQuality?.isHlsVariant == true
+            val isAudio = selectedQuality?.formatTag?.contains("AUDIO", ignoreCase = true) == true ||
+                    selectedQuality?.resolution?.contains("Audio", ignoreCase = true) == true
             val totalBytes = selectedQuality?.estimatedSizeBytes ?: mediaItem.fileSizeBytes
-            val fileName = if (selectedQuality != null && selectedQuality.resolution.isNotBlank()) {
-                val base = mediaItem.cleanFileName.substringBeforeLast('.')
-                val ext = if (isM3u8) ".m3u8" else ".mp4"
-                "${base}_${selectedQuality.resolution}$ext"
+            val fileName = if (selectedQuality != null) {
+                var base = mediaItem.cleanFileName.substringBeforeLast('.')
+                if (base.endsWith(".m3u8", ignoreCase = true)) {
+                    base = base.removeSuffix(".m3u8").removeSuffix(".M3U8")
+                }
+                val ext = when {
+                    isAudio -> ".mp3"
+                    // When downloaded, HLS segments are merged into standard playable MP4 video
+                    else -> ".mp4"
+                }
+                val badge = selectedQuality.cleanResolutionBadge.replace(" ", "_")
+                "${base}_$badge$ext"
             } else {
-                mediaItem.cleanFileName
+                val clean = mediaItem.cleanFileName
+                if (clean.endsWith(".m3u8", ignoreCase = true)) {
+                    "${clean.removeSuffix(".m3u8").removeSuffix(".M3U8")}.mp4"
+                } else {
+                    clean
+                }
+            }
+
+            // Populate headers JSON with YoutubeDL metadata for automatic native muxing
+            val headersObj = try {
+                JSONObject(mediaItem.headersJson)
+            } catch (_: Exception) {
+                JSONObject()
+            }
+            if (selectedQuality?.isYoutubeDl == true || !selectedQuality?.formatId.isNullOrBlank()) {
+                headersObj.put("isYoutubeDl", true)
+                headersObj.put("formatId", selectedQuality?.formatId ?: "best")
+                headersObj.put("webpageUrl", mediaItem.pageUrl.ifBlank { mediaItem.url })
             }
 
             downloadRepository.enqueueDownload(
                 url = downloadUrl,
                 websiteUrl = mediaItem.pageUrl,
                 fileName = fileName,
-                mimeType = if (isM3u8) "application/x-mpegURL" else mediaItem.mimeType,
+                mimeType = when {
+                    isAudio -> "audio/mpeg"
+                    // Saved file is a standard video/mp4 playable by all local players
+                    isM3u8 -> "video/mp4"
+                    else -> mediaItem.mimeType
+                },
                 totalBytes = totalBytes,
                 isM3u8 = isM3u8,
-                headersJson = mediaItem.headersJson,
+                headersJson = headersObj.toString(),
                 isHidden = _saveToVault.value
             )
 

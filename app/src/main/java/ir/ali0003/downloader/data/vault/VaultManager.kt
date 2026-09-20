@@ -26,6 +26,7 @@ class VaultManager(context: Context) {
         private const val KEY_SALT = "vault_pin_salt"
         private const val KEY_BIOMETRIC_ENABLED = "vault_biometric_enabled"
         private const val KEY_VAULT_SET_UP = "vault_is_set_up"
+        private const val KEY_BIOMETRIC_REGISTERED = "vault_biometric_registered"
         private const val KEY_AUTO_LOCK_MINUTES = "vault_auto_lock_minutes"
         private const val KEY_HIDDEN_MAPPINGS = "vault_hidden_mappings"
     }
@@ -50,7 +51,9 @@ class VaultManager(context: Context) {
     }
 
     fun isVaultConfigured(): Boolean {
-        return prefs.getBoolean(KEY_VAULT_SET_UP, false) && prefs.getString(KEY_PIN_HASH, null) != null
+        val hasPin = prefs.getBoolean(KEY_VAULT_SET_UP, false) && prefs.getString(KEY_PIN_HASH, null) != null
+        val hasBiometric = isBiometricRegistered()
+        return hasPin || hasBiometric
     }
 
     fun setupPin(pin: String): Boolean {
@@ -85,8 +88,22 @@ class VaultManager(context: Context) {
         return success
     }
 
+    fun isBiometricRegistered(): Boolean {
+        return prefs.getBoolean(KEY_BIOMETRIC_REGISTERED, false)
+    }
+
+    fun markBiometricRegistered() {
+        prefs.edit()
+            .putBoolean(KEY_BIOMETRIC_REGISTERED, true)
+            .putBoolean(KEY_BIOMETRIC_ENABLED, true)
+            .putBoolean(KEY_VAULT_SET_UP, true)
+            .apply()
+        _isVaultUnlocked.value = true
+        _failedAttempts.value = 0
+    }
+
     fun isBiometricEnabled(): Boolean {
-        return prefs.getBoolean(KEY_BIOMETRIC_ENABLED, false)
+        return prefs.getBoolean(KEY_BIOMETRIC_ENABLED, true)
     }
 
     fun setBiometricEnabled(enabled: Boolean) {

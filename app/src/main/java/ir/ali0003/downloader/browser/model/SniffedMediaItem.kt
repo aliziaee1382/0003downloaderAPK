@@ -24,13 +24,20 @@ data class SniffedMediaItem(
         get() {
             val baseName = displayTitle.replace("[^a-zA-Z0-9._-]".toRegex(), "_").trim('_')
             val ext = when {
-                isM3u8 -> ".m3u8"
+                mimeType.contains("audio") || mimeType.contains("mp3") -> ".mp3"
                 isDash -> ".mpd"
                 mimeType.contains("webm") -> ".webm"
-                mimeType.contains("audio") || mimeType.contains("mp3") -> ".mp3"
+                // HLS streams download and merge chunks into a standalone playable MP4 video
+                isM3u8 -> ".mp4"
                 else -> ".mp4"
             }
-            return if (baseName.endsWith(ext, ignoreCase = true)) baseName else "$baseName$ext"
+            // Strip .m3u8 if present in baseName before appending .mp4
+            val sanitizedBase = if (baseName.endsWith(".m3u8", ignoreCase = true)) {
+                baseName.removeSuffix(".m3u8").removeSuffix(".M3U8")
+            } else {
+                baseName
+            }
+            return if (sanitizedBase.endsWith(ext, ignoreCase = true)) sanitizedBase else "$sanitizedBase$ext"
         }
 
     val headersJson: String
@@ -39,6 +46,40 @@ data class SniffedMediaItem(
             val entries = headers.entries.joinToString(",") { "\"${it.key}\":\"${it.value.replace("\"", "\\\"")}\"" }
             return "{$entries}"
         }
+
+    val bestResolutionBadge: String
+        get() {
+            qualities.firstOrNull()?.cleanResolutionBadge?.let {
+                if (it.isNotBlank()) return it
+            }
+            val lower = (title + " " + url).lowercase()
+            return when {
+                mimeType.contains("audio", ignoreCase = true) -> "AUDIO"
+                lower.contains("1080") ||
+                        lower.contains("4k") || lower.contains("2160") ||
+                        lower.contains("2k") || lower.contains("1440") -> "1080p FHD"
+                lower.contains("720") -> "720p HD"
+                lower.contains("480") -> "480p SD"
+                lower.contains("360") -> "360p"
+                isM3u8 -> "1080p FHD"
+                else -> "1080p FHD"
+            }
+        }
+
+    val bestFileSizeBytes: Long
+        get() {
+            if (fileSizeBytes > 0L) return fileSizeBytes
+            val qualitySize = qualities.firstOrNull()?.estimatedSizeBytes ?: 0L
+            if (qualitySize > 0L) return qualitySize
+            if (durationSeconds > 0.0) {
+                // Estimate based on standard 2.5 Mbps HD bitrate
+                return ((2_500_000L * durationSeconds) / 8.0).toLong()
+            }
+            return 35 * 1024 * 1024L
+        }
+
+    val bestFormattedSize: String
+        get() = VideoQualityOption.formatFileSize(bestFileSizeBytes)
 
     companion object {
         fun extractFileNameFromUrl(url: String): String {

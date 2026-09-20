@@ -61,19 +61,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.AddBox
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
@@ -84,6 +86,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -130,6 +133,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import ir.ali0003.downloader.browser.model.SniffedMediaItem
 import ir.ali0003.downloader.browser.model.VideoQualityOption
@@ -178,6 +184,9 @@ fun InAppBrowserScreen(
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val shortcuts by viewModel.shortcuts.collectAsStateWithLifecycle()
+    val isExtractingMedia by viewModel.isExtractingNativeMedia.collectAsStateWithLifecycle()
+    val lastActiveUrl by viewModel.lastActiveUrl.collectAsStateWithLifecycle()
+    val lastActiveTitle by viewModel.lastActiveTitle.collectAsStateWithLifecycle()
 
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
     var webViewResetKey by remember { mutableIntStateOf(0) }
@@ -187,6 +196,42 @@ fun InAppBrowserScreen(
     var showTutorialDialog by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
     var showHistorySheet by remember { mutableStateOf(false) }
+
+    // Smart Clipboard URL Sniffer State
+    var detectedClipboardUrl by remember { mutableStateOf<String?>(null) }
+    var lastHandledClipboardUrl by remember { mutableStateOf<String?>(null) }
+    var lastClipboardCheckTimestamp by remember { mutableStateOf(0L) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Observe clipboard on app resume with rate-limit protection against audit log spam
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val now = System.currentTimeMillis()
+                if (now - lastClipboardCheckTimestamp > 1500L) {
+                    lastClipboardCheckTimestamp = now
+                    try {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        if (clipboard?.hasPrimaryClip() == true) {
+                            val clip = clipboard.primaryClip
+                            if (clip != null && clip.itemCount > 0) {
+                                val text = clip.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                                if (!text.isNullOrBlank() && (text.startsWith("http://") || text.startsWith("https://"))) {
+                                    if (text != lastHandledClipboardUrl && text != currentUrl) {
+                                        detectedClipboardUrl = text
+                                    }
+                                }
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Intercept Back Press: Collapse search -> WebView goBack -> Return to Home
     BackHandler(enabled = isEditingUrl || !isBrowserHome) {
@@ -234,6 +279,14 @@ fun InAppBrowserScreen(
                 // ==========================================
                 BrowserHomePortalView(
                     shortcuts = shortcuts,
+                    lastActiveUrl = lastActiveUrl,
+                    lastActiveTitle = lastActiveTitle,
+                    recentHistoryUrl = history.firstOrNull()?.url,
+                    recentHistoryTitle = history.firstOrNull()?.title,
+                    onResumePreviousSession = {
+                        val restored = viewModel.restorePreviousSession()
+                        webViewInstance?.loadUrl(restored)
+                    },
                     onSearchOrNavigate = { query ->
                         viewModel.navigateToUrl(query)
                         webViewInstance?.loadUrl(viewModel.currentUrl.value)
@@ -336,7 +389,6 @@ fun InAppBrowserScreen(
                                     settings.apply {
                                         javaScriptEnabled = true
                                         domStorageEnabled = true
-                                        databaseEnabled = true
                                         allowFileAccess = false
                                         allowContentAccess = true
                                         loadWithOverviewMode = true
@@ -369,7 +421,6 @@ fun InAppBrowserScreen(
                                             super.onPageStarted(view, url, favicon)
                                             if (url != null) {
                                                 viewModel.onPageStarted(url)
-                                                view?.evaluateJavascript(VideoSnifferEngine.DOM_SNIFFER_JS, null)
                                             }
                                         }
 
@@ -382,22 +433,35 @@ fun InAppBrowserScreen(
                                                     canBack = view?.canGoBack() ?: false,
                                                     canForward = view?.canGoForward() ?: false
                                                 )
-                                                view?.evaluateJavascript(VideoSnifferEngine.DOM_SNIFFER_JS, null)
+                                                try {
+                                                    view?.evaluateJavascript(VideoSnifferEngine.DOM_SNIFFER_JS, null)
+                                                } catch (_: Exception) {}
                                             }
+                                        }
+
+                                        override fun onReceivedError(
+                                            view: WebView?,
+                                            request: WebResourceRequest?,
+                                            error: android.webkit.WebResourceError?
+                                        ) {
+                                            super.onReceivedError(view, request, error)
                                         }
 
                                         override fun onRenderProcessGone(
                                             view: WebView?,
                                             detail: RenderProcessGoneDetail?
                                         ): Boolean {
+                                            val didCrash = detail?.didCrash() ?: true
+                                            android.util.Log.e("InAppBrowser", "onRenderProcessGone detected (crashed: $didCrash)")
                                             try {
                                                 view?.let {
+                                                    it.stopLoading()
                                                     (it.parent as? ViewGroup)?.removeView(it)
                                                     it.destroy()
                                                 }
                                             } catch (_: Exception) {}
                                             webViewInstance = null
-                                            // Recreate a healthy WebView automatically
+                                            // Safely trigger recreation of WebView
                                             webViewResetKey++
                                             return true
                                         }
@@ -450,7 +514,7 @@ fun InAppBrowserScreen(
                     }
 
                     // Sniffed Media Floating Action Button
-                    if (sniffedMediaList.isNotEmpty()) {
+                    if (sniffedMediaList.isNotEmpty() || isExtractingMedia) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
@@ -459,6 +523,7 @@ fun InAppBrowserScreen(
                             SniffedMediaFab(
                                 count = sniffedMediaList.size,
                                 scale = pulseScale,
+                                isExtracting = isExtractingMedia && sniffedMediaList.isEmpty(),
                                 onClick = {
                                     showSnifferSheet = true
                                 }
@@ -489,10 +554,11 @@ fun InAppBrowserScreen(
         }
 
         // Two-Step Media Sniffer Bottom Sheet (Source Selector -> Quality & Format Selector)
-        if (showSnifferSheet || selectedMedia != null) {
+        if (showSnifferSheet) {
             MediaSnifferBottomSheet(
                 sniffedMediaList = sniffedMediaList,
                 initialSelectedItem = selectedMedia,
+                isExtracting = isExtractingMedia,
                 saveToVault = saveToVault,
                 onToggleSaveToVault = { viewModel.toggleSaveToVault(it) },
                 onDismiss = {
@@ -521,6 +587,10 @@ fun InAppBrowserScreen(
                     webViewInstance?.clearHistory()
                     CookieManager.getInstance().removeAllCookies(null)
                     viewModel.clearHistory()
+                    try {
+                        val jsCacheDir = java.io.File(context.cacheDir, "WebView/Default/HTTP Cache/Code Cache/js")
+                        if (!jsCacheDir.exists()) jsCacheDir.mkdirs()
+                    } catch (_: Exception) {}
                 }
             )
         }
@@ -595,6 +665,32 @@ fun InAppBrowserScreen(
                 }
             }
         }
+
+        // Floating Clipboard URL Sniffer Card
+        AnimatedVisibility(
+            visible = detectedClipboardUrl != null,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 80.dp, start = 16.dp, end = 16.dp),
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it }
+        ) {
+            detectedClipboardUrl?.let { url ->
+                ClipboardSnifferFloatingCard(
+                    url = url,
+                    onDismiss = {
+                        lastHandledClipboardUrl = url
+                        detectedClipboardUrl = null
+                    },
+                    onDownload = {
+                        lastHandledClipboardUrl = url
+                        detectedClipboardUrl = null
+                        viewModel.navigateToUrl(url)
+                        webViewInstance?.loadUrl(viewModel.currentUrl.value)
+                    }
+                )
+            }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -611,6 +707,11 @@ fun InAppBrowserScreen(
 @Composable
 fun BrowserHomePortalView(
     shortcuts: List<WebShortcutEntity>,
+    lastActiveUrl: String?,
+    lastActiveTitle: String?,
+    recentHistoryUrl: String?,
+    recentHistoryTitle: String?,
+    onResumePreviousSession: () -> Unit,
     onSearchOrNavigate: (String) -> Unit,
     onSaveShortcut: (slotIndex: Int, title: String, url: String, id: Long) -> Unit,
     onDeleteShortcut: (slotIndex: Int) -> Unit,
@@ -624,6 +725,20 @@ fun BrowserHomePortalView(
     var showMenu by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+
+    // Session resumption details
+    val targetSessionUrl = lastActiveUrl?.takeIf { it.isNotBlank() } ?: recentHistoryUrl
+    val targetSessionTitle = lastActiveTitle?.takeIf { it.isNotBlank() }
+        ?: recentHistoryTitle?.takeIf { it.isNotBlank() }
+        ?: targetSessionUrl?.let { url ->
+            try {
+                val host = java.net.URI(url).host
+                if (!host.isNullOrBlank()) host.removePrefix("www.").removePrefix("m.") else url
+            } catch (_: Exception) {
+                url
+            }
+        } ?: "صفحه قبل"
 
     Column(
         modifier = Modifier
@@ -681,7 +796,7 @@ fun BrowserHomePortalView(
             ) {
                 // Help/FAQ Button
                 GlassIconButton(
-                    icon = Icons.Default.HelpOutline,
+                    icon = Icons.AutoMirrored.Filled.HelpOutline,
                     onClick = onOpenTutorial,
                     size = 36.dp,
                     iconSize = 18.dp,
@@ -803,6 +918,29 @@ fun BrowserHomePortalView(
                             .size(18.dp)
                             .clickable { searchInput = "" }
                     )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.ContentPaste,
+                        contentDescription = "Paste from clipboard",
+                        tint = GlassTheme.colors.accentGlow,
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                try {
+                                    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                                    val text = clip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                                    if (!text.isNullOrBlank()) {
+                                        searchInput = text
+                                        onSearchOrNavigate(text)
+                                        focusManager.clearFocus()
+                                        keyboardController?.hide()
+                                    } else {
+                                        Toast.makeText(context, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                    )
                 }
 
                 Box(
@@ -821,7 +959,7 @@ fun BrowserHomePortalView(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ArrowForward,
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = "Go",
                         tint = Color.Black,
                         modifier = Modifier.size(18.dp)
@@ -830,7 +968,16 @@ fun BrowserHomePortalView(
             }
         }
 
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Smart Paste Video Link Card
+        SmartPasteCard(
+            onPasteAndGo = { url ->
+                onSearchOrNavigate(url)
+            }
+        )
+
+        Spacer(modifier = Modifier.height(20.dp))
 
         // Quick Access Platforms Section Header
         Row(
@@ -866,10 +1013,12 @@ fun BrowserHomePortalView(
 
         Spacer(modifier = Modifier.height(18.dp))
 
-        // "How to Download" Tutorial Banner Card
+        // "Continue Previous Session" / "ادامه مرور قبلی" Action Card
         GlassCard(
-            onClick = onOpenTutorial,
-            modifier = Modifier.fillMaxWidth()
+            onClick = onResumePreviousSession,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("continue_previous_session_button")
         ) {
             Row(
                 modifier = Modifier
@@ -880,49 +1029,81 @@ fun BrowserHomePortalView(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(46.dp)
                         .clip(RoundedCornerShape(14.dp))
                         .background(
                             brush = Brush.linearGradient(
                                 listOf(
-                                    GlassTheme.colors.accentGlow.copy(alpha = 0.3f),
-                                    GlassTheme.colors.accentGlow.copy(alpha = 0.1f)
+                                    GlassTheme.colors.accentGlow.copy(alpha = 0.35f),
+                                    GlassTheme.colors.accentGlow.copy(alpha = 0.12f)
                                 )
                             )
                         )
-                        .border(1.dp, GlassTheme.colors.accentGlow, RoundedCornerShape(14.dp)),
+                        .border(1.2.dp, GlassTheme.colors.accentGlow, RoundedCornerShape(14.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "ادامه مرور قبلی",
                         tint = GlassTheme.colors.accentGlow,
                         modifier = Modifier.size(24.dp)
                     )
                 }
 
                 Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "ادامه مرور قبلی",
+                            color = GlassTheme.colors.textPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(GlassTheme.colors.accentGlow.copy(alpha = 0.18f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "Resume",
+                                color = GlassTheme.colors.accentGlow,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
                     Text(
-                        text = "How to Download Videos?",
-                        color = GlassTheme.colors.textPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "1. Search video • 2. Play • 3. Tap download button",
+                        text = if (!targetSessionUrl.isNullOrBlank()) {
+                            "بازگشت به: $targetSessionTitle"
+                        } else {
+                            "بازآوری آخرین صفحه یا جستجوی در حال مرور"
+                        },
                         color = GlassTheme.colors.textSecondary,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp
+                        fontSize = 11.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                    contentDescription = null,
-                    tint = GlassTheme.colors.accentGlow,
-                    modifier = Modifier.size(16.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(GlassTheme.colors.surfaceGlassSubtle)
+                        .border(0.8.dp, GlassTheme.colors.glassBorder, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = null,
+                        tint = GlassTheme.colors.accentGlow,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
 
@@ -1232,7 +1413,7 @@ fun ActiveWebBrowsingTopBar(
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.ArrowForward,
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                             contentDescription = "Navigate",
                             tint = Color.Black,
                             modifier = Modifier.size(18.dp)
@@ -1535,6 +1716,7 @@ fun BrowserDropdownMenu(
 fun SniffedMediaFab(
     count: Int,
     scale: Float,
+    isExtracting: Boolean = false,
     onClick: () -> Unit
 ) {
     Box(
@@ -1561,12 +1743,20 @@ fun SniffedMediaFab(
                 .border(1.8.dp, Color.White.copy(alpha = 0.85f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            Icon(
-                imageVector = Icons.Default.Download,
-                contentDescription = "Sniffed Media Detected ($count)",
-                tint = Color.Black,
-                modifier = Modifier.size(26.dp)
-            )
+            if (isExtracting && count == 0) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = Color.Black,
+                    strokeWidth = 2.5.dp
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = "Sniffed Media Detected ($count)",
+                    tint = Color.Black,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
         }
 
         // Top-End Anchored 24.dp Badge
@@ -2212,6 +2402,272 @@ fun HistoryBottomSheet(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Smart Paste Video Link Card on Browser Home Portal:
+ * Inspects clipboard on load, previews copied link if present, and triggers instant paste and download.
+ */
+@Composable
+fun SmartPasteCard(
+    onPasteAndGo: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var clipboardPreview by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        try {
+            val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+            val text = clip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+            if (!text.isNullOrBlank() && (text.startsWith("http://") || text.startsWith("https://"))) {
+                clipboardPreview = text
+            }
+        } catch (_: Exception) {}
+    }
+
+    GlassBox(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                try {
+                    val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+                    val text = clip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                    if (!text.isNullOrBlank()) {
+                        onPasteAndGo(text)
+                    } else {
+                        Toast.makeText(context, "Clipboard is empty. Copy a link first!", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (_: Exception) {}
+            },
+        shape = RoundedCornerShape(16.dp),
+        backgroundColor = GlassTheme.colors.cardBackground.copy(alpha = 0.88f),
+        borderColor = if (clipboardPreview != null) GlassTheme.colors.accentGlow else GlassTheme.colors.glassBorder
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(GlassTheme.colors.accentGlow.copy(alpha = 0.18f))
+                    .border(0.8.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.4f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ContentPaste,
+                    contentDescription = null,
+                    tint = GlassTheme.colors.accentGlow,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (clipboardPreview != null) "Paste Copied Link & Download" else "Paste Video Link Directly",
+                    color = GlassTheme.colors.textPrimary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (clipboardPreview != null) clipboardPreview!! else "Supports Instagram, YouTube, Aparat, TikTok, Twitter...",
+                    color = if (clipboardPreview != null) GlassTheme.colors.accentGlow else GlassTheme.colors.textSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(GlassTheme.colors.accentGlow)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "PASTE",
+                    color = Color.Black,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.5.sp
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Floating Smart Clipboard Link Sniffer Dialog / Banner:
+ * Appears when returning to app or opening with a valid video / web link copied on the clipboard.
+ */
+@Composable
+fun ClipboardSnifferFloatingCard(
+    url: String,
+    onDismiss: () -> Unit,
+    onDownload: () -> Unit
+) {
+    val cleanHost = try {
+        val uri = java.net.URI(url)
+        val host = uri.host ?: ""
+        if (host.startsWith("www.")) host.substring(4) else host
+    } catch (_: Exception) {
+        url.substringAfter("://").substringBefore("/").removePrefix("www.")
+    }
+
+    GlassBox(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("clipboard_sniffer_dialog"),
+        shape = RoundedCornerShape(18.dp),
+        backgroundColor = GlassTheme.colors.cardBackground.copy(alpha = 0.98f),
+        borderColor = GlassTheme.colors.accentGlow
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            // Header Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(GlassTheme.colors.accentGlow.copy(alpha = 0.2f))
+                            .border(0.8.dp, GlassTheme.colors.accentGlow, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ContentPaste,
+                            contentDescription = null,
+                            tint = GlassTheme.colors.accentGlow,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    Column {
+                        Text(
+                            text = "COPIED LINK DETECTED",
+                            color = GlassTheme.colors.accentGlow,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.8.sp
+                        )
+                        if (cleanHost.isNotBlank()) {
+                            Text(
+                                text = cleanHost,
+                                color = GlassTheme.colors.textPrimary,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                }
+
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Dismiss",
+                    tint = GlassTheme.colors.textMuted,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onDismiss)
+                        .padding(2.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // URL Preview snippet
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(GlassTheme.colors.surfaceGlass)
+                    .border(0.6.dp, GlassTheme.colors.glassBorder, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = url,
+                    color = GlassTheme.colors.textSecondary,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Actions Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Dismiss Button
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(GlassTheme.colors.surfaceGlass)
+                        .border(0.8.dp, GlassTheme.colors.glassBorder, RoundedCornerShape(10.dp))
+                        .clickable(onClick = onDismiss),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Dismiss",
+                        color = GlassTheme.colors.textSecondary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Download / Inspect Button
+                Box(
+                    modifier = Modifier
+                        .weight(1.4f)
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(GlassTheme.colors.accentGlow)
+                        .clickable(onClick = onDownload)
+                        .testTag("clipboard_download_action"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Download,
+                            contentDescription = null,
+                            tint = Color.Black,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = "Download / Open",
+                            color = Color.Black,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black
+                        )
                     }
                 }
             }

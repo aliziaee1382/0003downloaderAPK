@@ -1,3 +1,8 @@
+@file:OptIn(
+    androidx.media3.common.util.UnstableApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class
+)
+
 package ir.ali0003.downloader.ui.player
 
 import android.content.Context
@@ -7,8 +12,12 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,15 +35,16 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
-import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.outlined.FitScreen
+import androidx.compose.material.icons.outlined.SlowMotionVideo
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -53,8 +63,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -73,19 +87,20 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.data.vault.VaultFileManager
-import ir.ali0003.downloader.ui.glass.GlassBadge
-import ir.ali0003.downloader.ui.glass.GlassBox
-import ir.ali0003.downloader.ui.glass.GlassIconButton
 import ir.ali0003.downloader.ui.glass.GlassTheme
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Fullscreen In-App Glassmorphic Video Player powered by Media3 ExoPlayer.
- * Seamlessly plays public MP4 files, raw streams, and encrypted/hidden .vault files.
+ * Premium Cinematic In-App Video Player powered by Media3 ExoPlayer.
+ * Features:
+ * - Floating Frosted Glass UI with top and bottom vignettes
+ * - Custom scrub bar with live dragging feedback & time pill
+ * - Double-tap left/right to seek 10s with ripple visual animations
+ * - Polished pill controls for Aspect Ratio, Playback Speed, and Quick Seek
+ * - Seamless support for offline downloads, vault encrypted files, and online streams
  */
-@OptIn(UnstableApi::class)
+@OptIn(UnstableApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun InAppVideoPlayerSheet(
     task: DownloadTaskEntity,
@@ -101,7 +116,14 @@ fun InAppVideoPlayerSheet(
     var duration by remember { mutableLongStateOf(0L) }
     var showControls by remember { mutableStateOf(true) }
 
-    // Resize Mode (Fit = 0, Fill = 3, Zoom = 4, FixedWidth = 1, FixedHeight = 2)
+    // Double-tap visual feedback state (+10s or -10s)
+    var doubleTapFeedbackSide by remember { mutableStateOf<String?>(null) } // "left" or "right"
+
+    // Scrubbing interactive state
+    var isUserScrubbing by remember { mutableStateOf(false) }
+    var scrubPositionFraction by remember { mutableFloatStateOf(0f) }
+
+    // Resize Mode (Fit = 0, Fill = 3, Zoom = 4)
     val resizeModes = listOf(
         Pair("FIT", AspectRatioFrameLayout.RESIZE_MODE_FIT),
         Pair("FILL", AspectRatioFrameLayout.RESIZE_MODE_FILL),
@@ -127,22 +149,30 @@ fun InAppVideoPlayerSheet(
             }
     }
 
-    // Auto hide controls timer
-    LaunchedEffect(showControls, isPlaying) {
-        if (showControls && isPlaying) {
-            delay(3500)
+    // Auto hide controls timer (stays visible when paused or user is scrubbing)
+    LaunchedEffect(showControls, isPlaying, isUserScrubbing) {
+        if (showControls && isPlaying && !isUserScrubbing) {
+            delay(4000)
             showControls = false
+        }
+    }
+
+    // Double-tap visual feedback auto-dismiss
+    LaunchedEffect(doubleTapFeedbackSide) {
+        if (doubleTapFeedbackSide != null) {
+            delay(650)
+            doubleTapFeedbackSide = null
         }
     }
 
     // Periodic position updater
     LaunchedEffect(exoPlayer) {
         while (true) {
-            if (exoPlayer.isPlaying) {
+            if (exoPlayer.isPlaying && !isUserScrubbing) {
                 currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
                 duration = exoPlayer.duration.coerceAtLeast(0L)
             }
-            delay(300)
+            delay(250)
         }
     }
 
@@ -155,7 +185,29 @@ fun InAppVideoPlayerSheet(
             Uri.parse(task.url)
         }
 
-        val mediaItem = MediaItem.fromUri(mediaUri)
+        val mediaItem = if (targetFile != null && targetFile.exists()) {
+            // Offline local file: If it was an HLS download saved as .m3u8, override MIME so ExoPlayer decodes it as MPEG-TS/video stream
+            val fileNameLower = (targetFile.name).lowercase()
+            if (fileNameLower.endsWith(".m3u8") || task.isM3u8) {
+                MediaItem.Builder()
+                    .setUri(mediaUri)
+                    .setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP2T)
+                    .build()
+            } else {
+                MediaItem.fromUri(mediaUri)
+            }
+        } else {
+            // Online direct or streaming URL
+            if (task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)) {
+                MediaItem.Builder()
+                    .setUri(mediaUri)
+                    .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                    .build()
+            } else {
+                MediaItem.fromUri(mediaUri)
+            }
+        }
+
         exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
         exoPlayer.play()
@@ -198,19 +250,13 @@ fun InAppVideoPlayerSheet(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) {
-                    showControls = !showControls
-                }
         ) {
-            // Video View Container
+            // 1. AndroidView Video Player Surface
             AndroidView(
                 factory = { ctx ->
                     PlayerView(ctx).apply {
                         player = exoPlayer
-                        useController = false // Use our custom Glass UI overlay
+                        useController = false
                         resizeMode = resizeModes[currentResizeIndex].second
                     }
                 },
@@ -225,29 +271,167 @@ fun InAppVideoPlayerSheet(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Buffering Spinner
-            if (isBuffering) {
-                CircularProgressIndicator(
-                    color = GlassTheme.colors.accentGlow,
-                    modifier = Modifier
-                        .size(54.dp)
-                        .align(Alignment.Center)
-                )
-            }
+            // 2. Gesture Capture Layer: Single tap toggles controls, Double tap seeks -10s / +10s
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = {
+                                showControls = !showControls
+                            },
+                            onDoubleTap = { offset ->
+                                val screenWidth = size.width
+                                if (offset.x < screenWidth * 0.4f) {
+                                    // Rewind 10 seconds
+                                    val target = (exoPlayer.currentPosition - 10000).coerceAtLeast(0L)
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                    doubleTapFeedbackSide = "left"
+                                } else if (offset.x > screenWidth * 0.6f) {
+                                    // Fast-forward 10 seconds
+                                    val target = (exoPlayer.currentPosition + 10000).coerceAtMost(duration)
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                    doubleTapFeedbackSide = "right"
+                                } else {
+                                    // Middle double tap: Play / Pause toggle
+                                    if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+                                }
+                            }
+                        )
+                    }
+            )
 
-            // Glass Overlay Controls
+            // 3. Double-tap animated feedback badges
             AnimatedVisibility(
-                visible = showControls,
-                enter = fadeIn(animationSpec = tween(250)),
-                exit = fadeOut(animationSpec = tween(250)),
-                modifier = Modifier.fillMaxSize()
+                visible = doubleTapFeedbackSide == "left",
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut(),
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 48.dp)
             ) {
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.45f))
+                        .size(80.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .border(1.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.6f), CircleShape),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Top Bar (Filename, Vault Badge, Aspect Ratio, Speed & Close)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Replay10,
+                            contentDescription = null,
+                            tint = GlassTheme.colors.accentGlow,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Text(
+                            text = "-10s",
+                            color = GlassTheme.colors.accentGlow,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            AnimatedVisibility(
+                visible = doubleTapFeedbackSide == "right",
+                enter = fadeIn() + scaleIn(),
+                exit = fadeOut() + scaleOut(),
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 48.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(80.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .border(1.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.6f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.Forward10,
+                            contentDescription = null,
+                            tint = GlassTheme.colors.accentGlow,
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Text(
+                            text = "+10s",
+                            color = GlassTheme.colors.accentGlow,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // 4. Buffering Spinner
+            if (isBuffering) {
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .border(1.dp, GlassTheme.colors.glassBorderHighlight.copy(alpha = 0.3f), CircleShape)
+                        .align(Alignment.Center),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        color = GlassTheme.colors.accentGlow,
+                        strokeWidth = 3.dp,
+                        modifier = Modifier.size(38.dp)
+                    )
+                }
+            }
+
+            // 5. Cinematic Vignettes & Controls Overlay
+            AnimatedVisibility(
+                visible = showControls,
+                enter = fadeIn(animationSpec = tween(220)),
+                exit = fadeOut(animationSpec = tween(220)),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // Top Shadow Vignette
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp)
+                            .align(Alignment.TopCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Black.copy(alpha = 0.85f),
+                                        Color.Black.copy(alpha = 0.45f),
+                                        Color.Transparent
+                                    )
+                                )
+                            )
+                    )
+
+                    // Bottom Shadow Vignette
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp)
+                            .align(Alignment.BottomCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color.Transparent,
+                                        Color.Black.copy(alpha = 0.55f),
+                                        Color.Black.copy(alpha = 0.92f)
+                                    )
+                                )
+                            )
+                    )
+
+                    // TOP BAR: Elegant Floating Glass Header
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -257,181 +441,347 @@ fun InAppVideoPlayerSheet(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // Title & Vault Badge
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.weight(1f)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f, fill = false)
                         ) {
                             if (task.isHidden) {
-                                GlassBadge(
-                                    text = "VAULT",
-                                    color = GlassTheme.colors.accentGlow
-                                )
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(GlassTheme.colors.accentGlow.copy(alpha = 0.2f))
+                                        .border(0.8.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = null,
+                                            tint = GlassTheme.colors.accentGlow,
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                        Text(
+                                            text = "VAULT",
+                                            color = GlassTheme.colors.accentGlow,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Black,
+                                            letterSpacing = 0.8.sp
+                                        )
+                                    }
+                                }
                             }
                             Text(
                                 text = task.fileName,
                                 color = Color.White,
                                 fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.SemiBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
 
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        // Top Action Pills (Speed, Aspect Ratio & Close)
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Aspect Ratio Toggle
-                            GlassBox(
+                            // Aspect Ratio Pill
+                            Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(Color.White.copy(alpha = 0.12f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(20.dp))
                                     .clickable {
                                         currentResizeIndex = (currentResizeIndex + 1) % resizeModes.size
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                                shape = RoundedCornerShape(10.dp),
-                                backgroundColor = GlassTheme.colors.surfaceGlass.copy(alpha = 0.5f)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = resizeModes[currentResizeIndex].first,
-                                    color = GlassTheme.colors.accentGlow,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.FitScreen,
+                                        contentDescription = null,
+                                        tint = GlassTheme.colors.accentGlow,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = resizeModes[currentResizeIndex].first,
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
 
-                            // Playback Speed Toggle
-                            GlassBox(
+                            // Playback Speed Pill
+                            Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(10.dp))
+                                    .clip(RoundedCornerShape(20.dp))
+                                    .background(Color.White.copy(alpha = 0.12f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(20.dp))
                                     .clickable {
                                         currentSpeedIndex = (currentSpeedIndex + 1) % speeds.size
                                         val newSpeed = speeds[currentSpeedIndex]
                                         exoPlayer.playbackParameters = PlaybackParameters(newSpeed)
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                                shape = RoundedCornerShape(10.dp),
-                                backgroundColor = GlassTheme.colors.surfaceGlass.copy(alpha = 0.5f)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "${speeds[currentSpeedIndex]}x",
-                                    color = GlassTheme.colors.textPrimary,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Outlined.SlowMotionVideo,
+                                        contentDescription = null,
+                                        tint = Color.White.copy(alpha = 0.8f),
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Text(
+                                        text = "${speeds[currentSpeedIndex]}x",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
 
-                            // Close Button
-                            GlassIconButton(
-                                icon = Icons.Default.Close,
-                                onClick = onDismiss,
-                                size = 36.dp,
-                                iconSize = 18.dp,
-                                contentDescription = "Close Player"
-                            )
+                            // Close Button (Glass Circular Button)
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White.copy(alpha = 0.14f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.25f), CircleShape)
+                                    .clickable(onClick = onDismiss)
+                                    .testTag("player_close_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Close",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
 
-                    // Center Transport Controls (Rewind 10s, Play/Pause, Fast Forward 10s)
+                    // CENTER TRANSPORT CONTROLS: Modern Floating Island
                     Row(
                         modifier = Modifier
                             .align(Alignment.Center)
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(28.dp),
+                            .padding(horizontal = 24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(32.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Rewind 10s
-                        GlassIconButton(
-                            icon = Icons.Default.Replay10,
-                            onClick = {
-                                val target = (exoPlayer.currentPosition - 10000).coerceAtLeast(0L)
-                                exoPlayer.seekTo(target)
-                            },
-                            size = 50.dp,
-                            iconSize = 28.dp,
-                            contentDescription = "Rewind 10s"
-                        )
-
-                        // Play/Pause Hero Button
+                        // Rewind 10s Button
                         Box(
                             modifier = Modifier
-                                .size(70.dp)
+                                .size(54.dp)
                                 .clip(CircleShape)
-                                .background(GlassTheme.colors.accentGlow)
+                                .background(Color.Black.copy(alpha = 0.5f))
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                                .clickable {
+                                    val target = (exoPlayer.currentPosition - 10000).coerceAtLeast(0L)
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                    doubleTapFeedbackSide = "left"
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Replay10,
+                                contentDescription = "Rewind 10s",
+                                tint = Color.White,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+
+                        // Play/Pause Hero Button with Neon Glow Aura
+                        Box(
+                            modifier = Modifier
+                                .size(76.dp)
+                                .shadow(
+                                    elevation = 16.dp,
+                                    shape = CircleShape,
+                                    ambientColor = GlassTheme.colors.accentGlow,
+                                    spotColor = GlassTheme.colors.accentGlow
+                                )
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.radialGradient(
+                                        colors = listOf(
+                                            GlassTheme.colors.accentGlow,
+                                            GlassTheme.colors.accentGlow.copy(alpha = 0.85f)
+                                        )
+                                    )
+                                )
                                 .clickable {
                                     if (exoPlayer.isPlaying) {
                                         exoPlayer.pause()
                                     } else {
                                         exoPlayer.play()
                                     }
-                                },
+                                }
+                                .testTag("player_play_pause_button"),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                                 contentDescription = if (isPlaying) "Pause" else "Play",
-                                tint = Color.Black,
-                                modifier = Modifier.size(38.dp)
+                                tint = Color(0xFF060A10),
+                                modifier = Modifier.size(42.dp)
                             )
                         }
 
-                        // Forward 10s
-                        GlassIconButton(
-                            icon = Icons.Default.Forward10,
-                            onClick = {
-                                val target = (exoPlayer.currentPosition + 10000).coerceAtMost(duration)
-                                exoPlayer.seekTo(target)
-                            },
-                            size = 50.dp,
-                            iconSize = 28.dp,
-                            contentDescription = "Forward 10s"
-                        )
+                        // Forward 10s Button
+                        Box(
+                            modifier = Modifier
+                                .size(54.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.5f))
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                                .clickable {
+                                    val target = (exoPlayer.currentPosition + 10000).coerceAtMost(duration)
+                                    exoPlayer.seekTo(target)
+                                    currentPosition = target
+                                    doubleTapFeedbackSide = "right"
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Forward10,
+                                contentDescription = "Forward 10s",
+                                tint = Color.White,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
                     }
 
-                    // Bottom Scrubbing Bar & Time Badges
-                    Column(
+                    // BOTTOM CONTROLS: Floating Glass Bar with Modern Scrubbing Track
+                    Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .align(Alignment.BottomCenter)
                             .navigationBarsPadding()
-                            .padding(horizontal = 20.dp, vertical = 18.dp)
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color(0xFF0D1420).copy(alpha = 0.85f))
+                            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
-                        Row(
+                        Column(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Text(
-                                text = formatDuration(currentPosition),
-                                color = GlassTheme.colors.textPrimary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = formatDuration(duration),
-                                color = GlassTheme.colors.textSecondary,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
+                            // Scrubber Progress Bar with Sleek Neon Styling
+                            val displayFraction = if (isUserScrubbing) {
+                                scrubPositionFraction
+                            } else if (duration > 0) {
+                                (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                            } else {
+                                0f
+                            }
 
-                        Slider(
-                            value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
-                            onValueChange = { frac ->
-                                if (duration > 0) {
-                                    val target = (frac * duration).toLong()
-                                    currentPosition = target
-                                    exoPlayer.seekTo(target)
+                            // Interactive M3 Slider styled with neon glow
+                            Slider(
+                                value = displayFraction,
+                                onValueChange = { frac ->
+                                    isUserScrubbing = true
+                                    scrubPositionFraction = frac
+                                },
+                                onValueChangeFinished = {
+                                    if (duration > 0) {
+                                        val target = (scrubPositionFraction * duration).toLong()
+                                        currentPosition = target
+                                        exoPlayer.seekTo(target)
+                                    }
+                                    isUserScrubbing = false
+                                },
+                                colors = SliderDefaults.colors(
+                                    thumbColor = GlassTheme.colors.accentGlow,
+                                    activeTrackColor = GlassTheme.colors.accentGlow,
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.18f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 0.dp)
+                            )
+
+                            // Timestamp and Status Info Row
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Current Position Pill
+                                val displayedCurrentMs = if (isUserScrubbing && duration > 0) {
+                                    (scrubPositionFraction * duration).toLong()
+                                } else {
+                                    currentPosition
                                 }
-                            },
-                            colors = SliderDefaults.colors(
-                                thumbColor = GlassTheme.colors.accentGlow,
-                                activeTrackColor = GlassTheme.colors.accentGlow,
-                                inactiveTrackColor = GlassTheme.colors.surfaceGlassSubtle
-                            ),
-                            modifier = Modifier.fillMaxWidth()
-                        )
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    // Live neon indicator dot
+                                    Box(
+                                        modifier = Modifier
+                                            .size(7.dp)
+                                            .clip(CircleShape)
+                                            .background(if (isPlaying) GlassTheme.colors.accentGlow else Color.Gray)
+                                    )
+                                    Text(
+                                        text = formatDuration(displayedCurrentMs),
+                                        color = GlassTheme.colors.accentGlow,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                    Text(
+                                        text = "/",
+                                        color = Color.White.copy(alpha = 0.35f),
+                                        fontSize = 12.sp
+                                    )
+                                    Text(
+                                        text = formatDuration(duration),
+                                        color = Color.White.copy(alpha = 0.7f),
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+
+                                // Remaining duration countdown badge
+                                val remaining = (duration - displayedCurrentMs).coerceAtLeast(0L)
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color.White.copy(alpha = 0.08f))
+                                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                                ) {
+                                    Text(
+                                        text = "-${formatDuration(remaining)}",
+                                        color = Color.White.copy(alpha = 0.6f),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
