@@ -22,17 +22,25 @@ android {
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     ndk {
-      abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64"))
+            abiFilters.clear()
+            abiFilters.add("arm64-v8a")
+        }
     }
-  }
 
-  signingConfigs {
-    create("release") {
-      val keystoreFile = file("${System.getenv("CM_BUILD_DIR") ?: project.rootDir}/my-upload-key.jks")
-      storeFile = keystoreFile
-      storePassword = "ali13821382ali"
-      keyAlias = "upload"
-      keyPassword = "ali13821382ali"
+    signingConfigs {
+        create("release") {
+            val keystoreFile = file("${System.getenv("CM_BUILD_DIR") ?: project.rootDir}/my-upload-key.jks")
+            storeFile = keystoreFile
+            storePassword = "ali13821382ali"
+            keyAlias = "upload"
+            keyPassword = "ali13821382ali"
+        }
+        create("debugConfig") {
+            storeFile = file("${rootDir}/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
