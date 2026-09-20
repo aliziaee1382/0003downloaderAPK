@@ -22,9 +22,8 @@ android {
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     ndk {
-    abiFilters.clear()
-    abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
-}
+      abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64"))
+    }
   }
 
   signingConfigs {
@@ -118,8 +117,8 @@ dependencies {
   implementation("androidx.media3:media3-effect:1.3.1")
   implementation(libs.androidx.biometric)
   implementation(libs.androidx.security.crypto)
-  implementation("io.github.junkfood02.youtubedl-android:library:0.17.3")
-  implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.3")
+  implementation(libs.youtubedl.android.library)
+  implementation(libs.youtubedl.android.ffmpeg)
   implementation(libs.firebase.ai)
   implementation(libs.firebase.appcheck.recaptcha)
   implementation(libs.firebase.appcheck.debug)
