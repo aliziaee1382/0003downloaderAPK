@@ -765,121 +765,25 @@ private fun formatDurationString(seconds: Double): String {
  * Build rich resolution quality options for a given SniffedMediaItem
  */
 private fun resolveComprehensiveQualities(item: SniffedMediaItem): List<VideoQualityOption> {
-    val baseSize = item.bestFileSizeBytes
-    val duration = item.durationSeconds
-
     if (item.qualities.isNotEmpty()) {
-        return item.qualities.map { opt ->
-            if (opt.estimatedSizeBytes <= 0L) {
-                val computed = if (opt.bandwidthBps > 0L && duration > 0.0) {
-                    ((opt.bandwidthBps * duration) / 8.0).toLong()
-                } else if (opt.bandwidthBps > 0L) {
-                    (opt.bandwidthBps * 180L) / 8L
-                } else {
-                    baseSize
-                }
-                opt.copy(estimatedSizeBytes = computed)
-            } else {
-                opt
-            }
-        }
+        return item.qualities
     }
 
-    return if (item.isM3u8) {
-        listOf(
-            VideoQualityOption(
-                label = "1080p Full HD (Source)",
-                resolution = "1920x1080",
-                bandwidthBps = 5_500_000L,
-                url = item.url,
-                isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) baseSize else 68 * 1024 * 1024L,
-                formatTag = "HLS"
-            ),
-            VideoQualityOption(
-                label = "720p High Definition",
-                resolution = "1280x720",
-                bandwidthBps = 2_800_000L,
-                url = item.url,
-                isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.60).toLong() else 38 * 1024 * 1024L,
-                formatTag = "HLS"
-            ),
-            VideoQualityOption(
-                label = "480p Standard Definition",
-                resolution = "854x480",
-                bandwidthBps = 1_200_000L,
-                url = item.url,
-                isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.35).toLong() else 19 * 1024 * 1024L,
-                formatTag = "HLS"
-            ),
-            VideoQualityOption(
-                label = "360p Low Quality",
-                resolution = "640x360",
-                bandwidthBps = 600_000L,
-                url = item.url,
-                isHlsVariant = true,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.20).toLong() else 10 * 1024 * 1024L,
-                formatTag = "HLS"
-            ),
-            VideoQualityOption(
-                label = "Audio Only (MP3/M4A)",
-                resolution = "Audio Only",
-                bandwidthBps = 128_000L,
-                url = item.url,
-                isHlsVariant = true,
-                estimatedSizeBytes = if (duration > 0.0) ((128_000L * duration) / 8.0).toLong() else 4 * 1024 * 1024L,
-                formatTag = "AUDIO"
-            )
-        )
-    } else {
-        listOf(
-            VideoQualityOption(
-                label = "1080p Full HD (Source)",
-                resolution = "1920x1080",
-                bandwidthBps = 5_000_000L,
-                url = item.url,
-                isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) baseSize else 52 * 1024 * 1024L,
-                formatTag = "MP4"
-            ),
-            VideoQualityOption(
-                label = "720p High Definition",
-                resolution = "1280x720",
-                bandwidthBps = 2_800_000L,
-                url = item.url,
-                isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.60).toLong() else 32 * 1024 * 1024L,
-                formatTag = "MP4"
-            ),
-            VideoQualityOption(
-                label = "480p Standard Definition",
-                resolution = "854x480",
-                bandwidthBps = 1_200_000L,
-                url = item.url,
-                isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.35).toLong() else 18 * 1024 * 1024L,
-                formatTag = "MP4"
-            ),
-            VideoQualityOption(
-                label = "360p Low Quality",
-                resolution = "640x360",
-                bandwidthBps = 600_000L,
-                url = item.url,
-                isHlsVariant = false,
-                estimatedSizeBytes = if (baseSize > 0) (baseSize * 0.20).toLong() else 9 * 1024 * 1024L,
-                formatTag = "MP4"
-            ),
-            VideoQualityOption(
-                label = "Audio Only (MP3/M4A)",
-                resolution = "Audio Only",
-                bandwidthBps = 128_000L,
-                url = item.url,
-                isHlsVariant = false,
-                estimatedSizeBytes = if (duration > 0.0) ((128_000L * duration) / 8.0).toLong() else 4 * 1024 * 1024L,
-                formatTag = "AUDIO"
-            )
-        )
+    val formatTag = when {
+        item.isM3u8 -> "HLS"
+        item.mimeType.contains("webm", ignoreCase = true) || item.url.contains(".webm", ignoreCase = true) -> "WEBM"
+        item.mimeType.contains("audio", ignoreCase = true) -> "AUDIO"
+        else -> "MP4"
     }
+
+    val singleOption = VideoQualityOption(
+        label = item.bestResolutionBadge.ifBlank { "Direct Stream" },
+        resolution = item.bestResolutionBadge,
+        bandwidthBps = 0L,
+        url = item.url,
+        isHlsVariant = item.isM3u8,
+        estimatedSizeBytes = item.fileSizeBytes,
+        formatTag = formatTag
+    )
+    return listOf(singleOption)
 }

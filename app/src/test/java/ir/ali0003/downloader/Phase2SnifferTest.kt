@@ -80,7 +80,7 @@ class Phase2SnifferTest {
         )
 
         assertNotNull(item.cleanFileName)
-        assertTrue(item.cleanFileName.endsWith(".m3u8"))
+        assertTrue(item.cleanFileName.endsWith(".mp4"))
         assertFalse(item.cleanFileName.contains(":"))
         assertFalse(item.cleanFileName.contains("?"))
         assertTrue(item.headersJson.contains("session=abc"))
@@ -95,7 +95,7 @@ class Phase2SnifferTest {
     }
 
     @Test
-    fun testHlsManifestCappingAndDeduplication() {
+    fun testHlsManifestGenuineVariants() {
         val multiResManifest = """
             #EXTM3U
             #EXT-X-STREAM-INF:BANDWIDTH=15000000,RESOLUTION=3840x2160
@@ -117,26 +117,40 @@ class Phase2SnifferTest {
         val baseUrl = "https://cdn.example.com/master.m3u8"
         val parsed = HlsManifestParser.parseManifestContent(multiResManifest, baseUrl)
 
-        val videoOptions = parsed.filter { !it.formatTag.contains("AUDIO", ignoreCase = true) }
-        val audioOptions = parsed.filter { it.formatTag.contains("AUDIO", ignoreCase = true) }
+        // All 6 distinct resolutions are retained without being artificially replaced
+        assertEquals(6, parsed.size)
 
-        // Must have at most 4 standard video tiers: 1080p, 720p, 480p, 360p
-        assertEquals(4, videoOptions.size)
-        assertEquals(1, audioOptions.size)
+        // Deduplication between 1080p_high and 1080p_low kept the 5Mbps variant
+        val variant1080 = parsed.firstOrNull { it.resolution == "1920x1080" }
+        assertNotNull(variant1080)
+        assertEquals(5000000L, variant1080?.bandwidthBps)
 
-        // 1080p tier should have kept the highest bandwidth variant (from 4K/2K/1080p high)
-        val highest = videoOptions[0]
-        assertEquals("1920x1080", highest.resolution)
+        // Highest bandwidth is 4K
+        val highest = parsed[0]
+        assertEquals("3840x2160", highest.resolution)
         assertEquals(15000000L, highest.bandwidthBps)
-        assertTrue(highest.cleanResolutionBadge.contains("1080p"))
-        assertFalse(highest.cleanResolutionBadge.contains("4K"))
-        assertFalse(highest.cleanResolutionBadge.contains("2K"))
+    }
 
-        // Verify all clean badges
-        val badges = videoOptions.map { it.cleanResolutionBadge }
-        assertTrue(badges.contains("1080p FHD"))
-        assertTrue(badges.contains("720p HD"))
-        assertTrue(badges.contains("480p SD"))
-        assertTrue(badges.contains("360p Low"))
+    @Test
+    fun testSingleStreamMediaPlaylistDoesNotManufactureFakeTiers() {
+        val singleStreamPlaylist = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-TARGETDURATION:10
+            #EXTINF:9.009,
+            segment1.ts
+            #EXTINF:9.009,
+            segment2.ts
+            #EXT-X-ENDLIST
+        """.trimIndent()
+
+        val baseUrl = "https://cdn.example.com/video/hls_250p.m3u8"
+        val parsed = HlsManifestParser.parseManifestContent(singleStreamPlaylist, baseUrl)
+
+        // Must NOT manufacture fake 1080p or 720p tiers
+        assertEquals(1, parsed.size)
+        val single = parsed[0]
+        assertEquals("250p", single.cleanResolutionBadge)
+        assertEquals(baseUrl, single.url)
     }
 }

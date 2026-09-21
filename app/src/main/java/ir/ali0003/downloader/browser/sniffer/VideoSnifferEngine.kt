@@ -147,6 +147,27 @@ class VideoSnifferEngine(
             poster: String?,
             duration: Double
         ) {
+            onMediaDiscoveredWithQuality(
+                mediaUrl = mediaUrl,
+                mimeType = mimeType,
+                title = title,
+                poster = poster,
+                duration = duration,
+                qualityLabel = null,
+                resolution = null
+            )
+        }
+
+        @JavascriptInterface
+        fun onMediaDiscoveredWithQuality(
+            mediaUrl: String?,
+            mimeType: String?,
+            title: String?,
+            poster: String?,
+            duration: Double,
+            qualityLabel: String?,
+            resolution: String?
+        ) {
             if (mediaUrl.isNullOrBlank()) return
             if (mediaUrl.startsWith("blob:") || mediaUrl.startsWith("data:")) return
 
@@ -164,7 +185,9 @@ class VideoSnifferEngine(
                         requestHeaders = headers,
                         posterUrl = poster,
                         durationSeconds = duration,
-                        specifiedMime = mimeType
+                        specifiedMime = mimeType,
+                        qualityLabelHint = qualityLabel,
+                        resolutionHint = resolution
                     )
                 } catch (_: Exception) {
                     // Safe guard against WebView disposal while callback is posting
@@ -234,7 +257,9 @@ class VideoSnifferEngine(
         requestHeaders: Map<String, String>,
         posterUrl: String? = null,
         durationSeconds: Double = 0.0,
-        specifiedMime: String? = null
+        specifiedMime: String? = null,
+        qualityLabelHint: String? = null,
+        resolutionHint: String? = null
     ) {
         if (isAdOrJunkUrl(mediaUrl)) return
 
@@ -277,48 +302,15 @@ class VideoSnifferEngine(
                 qualities = if (hlsResult.qualities.isNotEmpty()) {
                     hlsResult.qualities
                 } else {
-                    val estSize = if (finalDuration > 0.0) {
-                        ((5_500_000L * finalDuration) / 8.0).toLong()
-                    } else {
-                        54 * 1024 * 1024L
-                    }
-
                     listOf(
                         VideoQualityOption(
-                            label = "1080p FHD (Adaptive Stream)",
-                            resolution = "1920x1080",
-                            bandwidthBps = 5_500_000L,
+                            label = "Direct Stream",
+                            resolution = "",
+                            bandwidthBps = 0L,
                             url = mediaUrl,
                             isHlsVariant = true,
-                            estimatedSizeBytes = estSize,
-                            formatTag = "HLS"
-                        ),
-                        VideoQualityOption(
-                            label = "720p HD (Adaptive Stream)",
-                            resolution = "1280x720",
-                            bandwidthBps = 2_800_000L,
-                            url = mediaUrl,
-                            isHlsVariant = true,
-                            estimatedSizeBytes = (estSize * 0.60).toLong(),
-                            formatTag = "HLS"
-                        ),
-                        VideoQualityOption(
-                            label = "480p SD (Adaptive Stream)",
-                            resolution = "854x480",
-                            bandwidthBps = 1_200_000L,
-                            url = mediaUrl,
-                            isHlsVariant = true,
-                            estimatedSizeBytes = (estSize * 0.35).toLong(),
-                            formatTag = "HLS"
-                        ),
-                        VideoQualityOption(
-                            label = "Audio Track Extract (AAC)",
-                            resolution = "Audio Only",
-                            bandwidthBps = 128_000L,
-                            url = mediaUrl,
-                            isHlsVariant = true,
-                            estimatedSizeBytes = if (finalDuration > 0.0) ((128_000L * finalDuration) / 8.0).toLong() else 4 * 1024 * 1024L,
-                            formatTag = "AUDIO"
+                            estimatedSizeBytes = 0L,
+                            formatTag = "HLS M3U8"
                         )
                     )
                 }
@@ -336,17 +328,17 @@ class VideoSnifferEngine(
                     else -> "MP4"
                 }
 
-                qualities = buildDirectVideoQualityOptions(
+                val singleOption = createGenuineDirectQualityOption(
                     mediaUrl = mediaUrl,
                     pageTitle = pageTitle,
                     fileSizeBytes = detectedSize,
                     durationSeconds = finalDuration,
-                    formatTag = formatTag
+                    formatTag = formatTag,
+                    qualityLabelHint = qualityLabelHint,
+                    resolutionHint = resolutionHint
                 )
 
-                if (detectedSize <= 0L) {
-                    detectedSize = qualities.firstOrNull()?.estimatedSizeBytes ?: 0L
-                }
+                qualities = listOf(singleOption)
             }
 
             // UNIFIED AGGREGATION & CANONICAL MERGE
@@ -376,7 +368,7 @@ class VideoSnifferEngine(
                 // Pick the most descriptive video title available
                 val bestTitle = pickBestTitle(previous?.title, pageTitle, mediaUrl)
 
-                // Normalize & bucket all accumulated qualities into at most 5-6 clean, sorted tiers
+                // Normalize & bucket all accumulated qualities into clean, genuine, sorted tiers
                 val standardizedQualities = normalizeAndBucketQualities(
                     rawQualities = accumulatedRawQualities,
                     durationSeconds = bestDuration,
@@ -522,220 +514,69 @@ class VideoSnifferEngine(
         return totalPart.trim().toLongOrNull() ?: 0L
     }
 
-    private fun buildDirectVideoQualityOptions(
+    private fun createGenuineDirectQualityOption(
         mediaUrl: String,
         pageTitle: String,
         fileSizeBytes: Long,
         durationSeconds: Double,
-        formatTag: String
-    ): List<VideoQualityOption> {
-        val lower = (pageTitle + " " + mediaUrl).lowercase()
+        formatTag: String,
+        qualityLabelHint: String? = null,
+        resolutionHint: String? = null
+    ): VideoQualityOption {
+        val lower = (mediaUrl + " " + (qualityLabelHint ?: "") + " " + (resolutionHint ?: "") + " " + pageTitle).lowercase()
 
-        val baseResolution = when {
+        val (resLabel, resDimensions) = when {
+            resolutionHint != null && resolutionHint.contains("x") -> {
+                val parts = resolutionHint.split("x")
+                val h = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                val label = if (h > 0) "${h}p" else resolutionHint
+                label to resolutionHint
+            }
+            resolutionHint != null && resolutionHint.matches(Regex("""\d+p?""")) -> {
+                val clean = resolutionHint.removeSuffix("p")
+                "${clean}p" to ""
+            }
+            qualityLabelHint != null && qualityLabelHint.isNotBlank() -> {
+                qualityLabelHint to ""
+            }
+            lower.contains("4k") || lower.contains("2160") -> "4K UHD" to "3840x2160"
+            lower.contains("2k") || lower.contains("1440") -> "1440p 2K" to "2560x1440"
             lower.contains("1080") -> "1080p FHD" to "1920x1080"
             lower.contains("720") -> "720p HD" to "1280x720"
             lower.contains("480") -> "480p SD" to "854x480"
             lower.contains("360") -> "360p" to "640x360"
+            lower.contains("250") -> "250p" to ""
+            lower.contains("240") -> "240p" to "426x240"
             else -> {
-                if (durationSeconds > 0.0 && fileSizeBytes > 0L) {
-                    val bitrate = (fileSizeBytes * 8) / durationSeconds
-                    when {
-                        bitrate >= 4_500_000 -> "1080p FHD" to "1920x1080"
-                        bitrate >= 2_200_000 -> "720p HD" to "1280x720"
-                        bitrate >= 900_000 -> "480p SD" to "854x480"
-                        else -> "360p" to "640x360"
-                    }
-                } else if (fileSizeBytes >= 70 * 1024 * 1024L) {
-                    "1080p FHD" to "1920x1080"
-                } else if (fileSizeBytes >= 25 * 1024 * 1024L) {
-                    "720p HD" to "1280x720"
+                if (formatTag == "AUDIO") {
+                    "Audio Track" to "Audio Only"
                 } else {
-                    "480p SD" to "854x480"
+                    "Direct Video" to ""
                 }
             }
         }
 
-        val finalSizeBytes = if (fileSizeBytes > 0L) {
-            fileSizeBytes
-        } else if (durationSeconds > 0.0) {
-            ((4_500_000L * durationSeconds) / 8.0).toLong()
+        val bandwidth = if (durationSeconds > 0.0 && fileSizeBytes > 0L) {
+            (fileSizeBytes * 8 / durationSeconds).toLong()
         } else {
-            42 * 1024 * 1024L
+            0L
         }
 
-        val primaryBandwidth = if (durationSeconds > 0.0 && finalSizeBytes > 0L) {
-            (finalSizeBytes * 8 / durationSeconds).toLong()
+        val displayLabel = if (resDimensions.isNotBlank() && !resLabel.contains(resDimensions)) {
+            "$resLabel ($resDimensions)"
         } else {
-            5_000_000L
+            resLabel
         }
 
-        val list = mutableListOf<VideoQualityOption>()
-
-        // 1. Primary Source Quality (Always with the EXACT probed file size)
-        list.add(
-            VideoQualityOption(
-                label = "${baseResolution.first} (Source)",
-                resolution = baseResolution.second,
-                bandwidthBps = primaryBandwidth,
-                url = mediaUrl,
-                isHlsVariant = false,
-                estimatedSizeBytes = finalSizeBytes,
-                formatTag = formatTag
-            )
+        return VideoQualityOption(
+            label = displayLabel,
+            resolution = if (resDimensions.isNotBlank()) resDimensions else resLabel,
+            bandwidthBps = bandwidth,
+            url = mediaUrl,
+            isHlsVariant = false,
+            estimatedSizeBytes = fileSizeBytes,
+            formatTag = formatTag
         )
-
-        // 2. Multi-tier quality presets
-        if (baseResolution.first.contains("1080")) {
-            list.add(
-                VideoQualityOption(
-                    label = "720p HD",
-                    resolution = "1280x720",
-                    bandwidthBps = 2_800_000L,
-                    url = mediaUrl,
-                    isHlsVariant = false,
-                    estimatedSizeBytes = (finalSizeBytes * 0.60).toLong(),
-                    formatTag = formatTag
-                )
-            )
-            list.add(
-                VideoQualityOption(
-                    label = "480p SD",
-                    resolution = "854x480",
-                    bandwidthBps = 1_200_000L,
-                    url = mediaUrl,
-                    isHlsVariant = false,
-                    estimatedSizeBytes = (finalSizeBytes * 0.35).toLong(),
-                    formatTag = formatTag
-                )
-            )
-            list.add(
-                VideoQualityOption(
-                    label = "360p Low Quality",
-                    resolution = "640x360",
-                    bandwidthBps = 600_000L,
-                    url = mediaUrl,
-                    isHlsVariant = false,
-                    estimatedSizeBytes = (finalSizeBytes * 0.20).toLong(),
-                    formatTag = formatTag
-                )
-            )
-        } else if (baseResolution.first.contains("720")) {
-            list.add(
-                VideoQualityOption(
-                    label = "480p SD",
-                    resolution = "854x480",
-                    bandwidthBps = 1_200_000L,
-                    url = mediaUrl,
-                    isHlsVariant = false,
-                    estimatedSizeBytes = (finalSizeBytes * 0.55).toLong(),
-                    formatTag = formatTag
-                )
-            )
-            list.add(
-                VideoQualityOption(
-                    label = "360p Low Quality",
-                    resolution = "640x360",
-                    bandwidthBps = 600_000L,
-                    url = mediaUrl,
-                    isHlsVariant = false,
-                    estimatedSizeBytes = (finalSizeBytes * 0.30).toLong(),
-                    formatTag = formatTag
-                )
-            )
-        } else if (baseResolution.first.contains("480")) {
-            list.add(
-                VideoQualityOption(
-                    label = "360p Low Quality",
-                    resolution = "640x360",
-                    bandwidthBps = 600_000L,
-                    url = mediaUrl,
-                    isHlsVariant = false,
-                    estimatedSizeBytes = (finalSizeBytes * 0.55).toLong(),
-                    formatTag = formatTag
-                )
-            )
-        }
-
-        // 3. Audio Track Extract
-        val audioDuration = if (durationSeconds > 0.0) durationSeconds else 180.0
-        val audioSize = if (durationSeconds > 0.0) {
-            ((128_000L * audioDuration) / 8.0).toLong()
-        } else {
-            (finalSizeBytes * 0.12).toLong().coerceAtLeast(3 * 1024 * 1024L)
-        }
-
-        list.add(
-            VideoQualityOption(
-                label = "Audio Track Extract (M4A/MP3)",
-                resolution = "Audio Only",
-                bandwidthBps = 128_000L,
-                url = mediaUrl,
-                isHlsVariant = false,
-                estimatedSizeBytes = audioSize,
-                formatTag = "AUDIO"
-            )
-        )
-
-        return list
-    }
-
-    enum class QualityTier(
-        val badge: String,
-        val title: String,
-        val minHeight: Int,
-        val standardWidth: Int,
-        val standardHeight: Int,
-        val nominalBandwidthBps: Long,
-        val relativeRatio: Double,
-        val sortOrder: Int
-    ) {
-        TIER_1080P("1080p FHD", "1080p Full HD", 1080, 1920, 1080, 5_500_000L, 1.0, 1),
-        TIER_720P("720p HD", "720p High Definition", 720, 1280, 720, 2_800_000L, 0.60, 2),
-        TIER_480P("480p SD", "480p Standard Definition", 480, 854, 480, 1_200_000L, 0.35, 3),
-        TIER_360P("360p Low", "360p Low Quality", 360, 640, 360, 600_000L, 0.20, 4),
-        TIER_AUDIO("Audio", "Audio Only (MP3/M4A)", 0, 0, 0, 128_000L, 0.10, 5)
-    }
-
-    private fun categorizeQualityTier(option: VideoQualityOption): QualityTier {
-        if (option.formatTag.contains("AUDIO", ignoreCase = true) ||
-            option.resolution.contains("Audio", ignoreCase = true) ||
-            option.label.contains("Audio", ignoreCase = true)
-        ) {
-            return QualityTier.TIER_AUDIO
-        }
-
-        val resLower = option.resolution.lowercase()
-        val labelLower = option.label.lowercase()
-        val urlLower = option.url.lowercase()
-
-        val height = when {
-            resLower.contains("x") -> resLower.substringAfter("x").trim().toIntOrNull() ?: 0
-            else -> 0
-        }
-
-        if (height >= 1080 || labelLower.contains("1080") || urlLower.contains("1080")) {
-            return QualityTier.TIER_1080P
-        }
-        if (height >= 720 || labelLower.contains("720") || urlLower.contains("720")) {
-            return QualityTier.TIER_720P
-        }
-        if (height >= 480 || labelLower.contains("480") || urlLower.contains("480")) {
-            return QualityTier.TIER_480P
-        }
-        if (height >= 360 || labelLower.contains("360") || urlLower.contains("360")) {
-            return QualityTier.TIER_360P
-        }
-        if (height > 0) {
-            return QualityTier.TIER_360P
-        }
-
-        // Fallback based on bandwidth
-        return when {
-            option.bandwidthBps >= 4_000_000L -> QualityTier.TIER_1080P
-            option.bandwidthBps >= 2_000_000L -> QualityTier.TIER_720P
-            option.bandwidthBps >= 900_000L -> QualityTier.TIER_480P
-            else -> QualityTier.TIER_360P
-        }
     }
 
     fun normalizeAndBucketQualities(
@@ -745,103 +586,64 @@ class VideoSnifferEngine(
         isHls: Boolean,
         fallbackUrl: String
     ): List<VideoQualityOption> {
-        val grouped = rawQualities.groupBy { categorizeQualityTier(it) }
-
-        // Find highest detected tier in candidates
-        val highestDetectedTier = grouped.keys.minByOrNull { it.sortOrder } ?: QualityTier.TIER_1080P
-
-        // Normalize into at most 5-6 clean, distinct tiers
-        val targetTiers = when (highestDetectedTier) {
-            QualityTier.TIER_1080P -> listOf(
-                QualityTier.TIER_1080P,
-                QualityTier.TIER_720P,
-                QualityTier.TIER_480P,
-                QualityTier.TIER_360P,
-                QualityTier.TIER_AUDIO
-            )
-            QualityTier.TIER_720P -> listOf(
-                QualityTier.TIER_720P,
-                QualityTier.TIER_480P,
-                QualityTier.TIER_360P,
-                QualityTier.TIER_AUDIO
-            )
-            QualityTier.TIER_480P -> listOf(
-                QualityTier.TIER_480P,
-                QualityTier.TIER_360P,
-                QualityTier.TIER_AUDIO
-            )
-            QualityTier.TIER_360P -> listOf(
-                QualityTier.TIER_360P,
-                QualityTier.TIER_AUDIO
-            )
-            QualityTier.TIER_AUDIO -> listOf(
-                QualityTier.TIER_AUDIO
+        if (rawQualities.isEmpty()) {
+            return listOf(
+                VideoQualityOption(
+                    label = if (isHls) "Direct Stream" else "Direct Video",
+                    resolution = "",
+                    bandwidthBps = 0L,
+                    url = fallbackUrl,
+                    isHlsVariant = isHls,
+                    estimatedSizeBytes = baseFileSizeBytes,
+                    formatTag = if (isHls) "HLS" else "MP4"
+                )
             )
         }
 
-        // Establish normalized 1080p equivalent base size
-        val base1080pSize: Long = when {
-            baseFileSizeBytes > 0L -> {
-                (baseFileSizeBytes / highestDetectedTier.relativeRatio).toLong().coerceAtLeast(10 * 1024 * 1024L)
+        // Retain genuine server-provided variants:
+        // Deduplicate variants that point to the exact same URL, keeping the one with probed file size
+        val deduplicated = rawQualities
+            .groupBy { it.url }
+            .mapNotNull { (_, optionsForUrl) ->
+                optionsForUrl.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
             }
-            durationSeconds > 0.0 -> {
-                ((QualityTier.TIER_1080P.nominalBandwidthBps * durationSeconds) / 8.0).toLong()
-            }
-            else -> 52 * 1024 * 1024L
+
+        // Sort descending by resolution height / bandwidth / size
+        return deduplicated.sortedWith(
+            compareByDescending<VideoQualityOption> { extractHeightForSorting(it) }
+                .thenByDescending { it.bandwidthBps }
+                .thenByDescending { it.estimatedSizeBytes }
+        )
+    }
+
+    private fun extractHeightForSorting(option: VideoQualityOption): Int {
+        if (option.formatTag.contains("AUDIO", ignoreCase = true) || option.resolution.contains("Audio", ignoreCase = true)) {
+            return -1
         }
-
-        return targetTiers.map { tier ->
-            val candidates = grouped[tier] ?: emptyList()
-            // Deduplicate aggressively: keep only the highest bitrate/size candidate for this tier
-            val bestCandidate = candidates.maxByOrNull {
-                it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps)
-            }
-
-            val isAudio = tier == QualityTier.TIER_AUDIO
-            val isSource = (tier == highestDetectedTier) && (bestCandidate != null)
-
-            val finalUrl = bestCandidate?.url ?: fallbackUrl
-            val finalIsHls = bestCandidate?.isHlsVariant ?: isHls
-            val finalBandwidth = if (bestCandidate != null && bestCandidate.bandwidthBps > 0L) {
-                bestCandidate.bandwidthBps
-            } else {
-                tier.nominalBandwidthBps
-            }
-
-            // Accurate file size calculation
-            val calculatedSize: Long = when {
-                bestCandidate != null && bestCandidate.estimatedSizeBytes > 0L -> {
-                    bestCandidate.estimatedSizeBytes
-                }
-                durationSeconds > 0.0 -> {
-                    ((tier.nominalBandwidthBps * durationSeconds) / 8.0).toLong().coerceAtLeast(1024 * 1024L)
-                }
-                else -> {
-                    (base1080pSize * tier.relativeRatio).toLong().coerceAtLeast(
-                        if (isAudio) 3 * 1024 * 1024L else 8 * 1024 * 1024L
-                    )
-                }
-            }
-
-            val label = when {
-                isAudio -> "Audio Only (MP3/M4A)"
-                isSource -> "${tier.title} (Source)"
-                else -> tier.title
-            }
-
-            val resString = if (isAudio) "Audio Only" else "${tier.standardWidth}x${tier.standardHeight}"
-            val formatTag = if (isAudio) "AUDIO" else if (finalIsHls) "HLS" else "MP4"
-
-            VideoQualityOption(
-                label = label,
-                resolution = resString,
-                bandwidthBps = finalBandwidth,
-                url = finalUrl,
-                isHlsVariant = finalIsHls,
-                estimatedSizeBytes = calculatedSize,
-                formatTag = formatTag
-            )
-        }.sortedBy { categorizeQualityTier(it).sortOrder }
+        val lower = (option.resolution + " " + option.label).lowercase()
+        val dimRegex = """(\d{3,4})x(\d{3,4})""".toRegex()
+        val dimMatch = dimRegex.find(lower)
+        if (dimMatch != null) {
+            val h = dimMatch.groupValues[2].toIntOrNull() ?: 0
+            if (h > 0) return h
+        }
+        val pRegex = """(\d{3,4})p\b""".toRegex()
+        val pMatch = pRegex.find(lower)
+        if (pMatch != null) {
+            val h = pMatch.groupValues[1].toIntOrNull() ?: 0
+            if (h > 0) return h
+        }
+        return when {
+            lower.contains("4k") || lower.contains("2160") -> 2160
+            lower.contains("2k") || lower.contains("1440") -> 1440
+            lower.contains("1080") -> 1080
+            lower.contains("720") -> 720
+            lower.contains("480") -> 480
+            lower.contains("360") -> 360
+            lower.contains("250") -> 250
+            lower.contains("240") -> 240
+            else -> 0
+        }
     }
 
     private fun extractHeadersForUrl(
@@ -915,61 +717,173 @@ class VideoSnifferEngine(
                 window.__videoSnifferInjected = true;
                 var reportedUrls = new Set();
 
-                function reportMedia(element) {
-                    if (!element) return;
+                function report(src, mime, title, poster, duration, qualityLabel, resolution) {
+                    if (!src || typeof src !== 'string') return;
+                    src = src.trim();
+                    if (!src || src.startsWith('blob:') || src.startsWith('data:') || src.startsWith('javascript:')) return;
                     try {
-                        var src = element.currentSrc || element.src;
-                        if (!src) {
-                            var sources = element.getElementsByTagName('source');
-                            if (sources && sources.length > 0) {
-                                src = sources[0].src;
-                            }
+                        var a = document.createElement('a');
+                        a.href = src;
+                        src = a.href;
+                    } catch(e) {}
+
+                    if (reportedUrls.has(src)) return;
+                    reportedUrls.add(src);
+
+                    var pageTitle = title || document.title || '';
+                    var p = poster || '';
+                    var dur = 0;
+                    try {
+                        if (duration && !isNaN(duration) && isFinite(duration) && duration > 0) {
+                            dur = duration;
                         }
-                        if (src && typeof src === 'string' && !src.startsWith('blob:') && !src.startsWith('data:')) {
-                            if (reportedUrls.has(src)) return;
-                            reportedUrls.add(src);
-                            var title = document.title || '';
-                            var poster = element.poster || '';
-                            var duration = 0;
-                            try {
-                                if (element.duration && !isNaN(element.duration) && isFinite(element.duration)) {
-                                    duration = element.duration;
-                                }
-                            } catch(_) {}
-                            var type = element.type || 'video/mp4';
-                            if (window.AndroidVideoSniffer && window.AndroidVideoSniffer.onMediaDiscovered) {
-                                window.AndroidVideoSniffer.onMediaDiscovered(src, type, title, poster, duration);
+                    } catch(_) {}
+
+                    var type = mime || 'video/mp4';
+                    var qLabel = qualityLabel || '';
+                    var res = resolution || '';
+
+                    if (window.AndroidVideoSniffer) {
+                        if (window.AndroidVideoSniffer.onMediaDiscoveredWithQuality) {
+                            window.AndroidVideoSniffer.onMediaDiscoveredWithQuality(src, type, pageTitle, p, dur, qLabel, res);
+                        } else if (window.AndroidVideoSniffer.onMediaDiscovered) {
+                            window.AndroidVideoSniffer.onMediaDiscovered(src, type, pageTitle, p, dur);
+                        }
+                    }
+                }
+
+                function scanElement(elem) {
+                    if (!elem) return;
+                    try {
+                        var dur = 0;
+                        try { dur = elem.duration || 0; } catch(_) {}
+                        var poster = elem.poster || '';
+                        var title = elem.getAttribute('title') || document.title || '';
+
+                        var src = elem.currentSrc || elem.src;
+                        if (src) {
+                            report(src, elem.type || 'video/mp4', title, poster, dur, '', '');
+                        }
+
+                        ['data-src', 'data-video', 'data-url'].forEach(function(attr) {
+                            var dataSrc = elem.getAttribute(attr);
+                            if (dataSrc) report(dataSrc, 'video/mp4', title, poster, dur, '', '');
+                        });
+
+                        var sources = elem.getElementsByTagName('source');
+                        for (var i = 0; i < sources.length; i++) {
+                            var s = sources[i];
+                            var sSrc = s.src || s.getAttribute('src') || s.getAttribute('data-src');
+                            if (sSrc) {
+                                var sType = s.type || s.getAttribute('type') || 'video/mp4';
+                                var label = s.getAttribute('label') || s.getAttribute('title') || s.getAttribute('data-quality') || '';
+                                var res = s.getAttribute('res') || s.getAttribute('size') || s.getAttribute('data-res') || '';
+                                report(sSrc, sType, title, poster, dur, label, res);
                             }
                         }
                     } catch(e) {}
                 }
 
-                function scanMedia() {
+                function scanPlayerConfigs() {
+                    try {
+                        if (window.html5player) {
+                            var hp = window.html5player;
+                            if (typeof hp.getVideoUrlHigh === 'function') report(hp.getVideoUrlHigh(), 'video/mp4', '', '', 0, 'High', '720p');
+                            if (typeof hp.getVideoUrlLow === 'function') report(hp.getVideoUrlLow(), 'video/mp4', '', '', 0, 'Low', '360p');
+                            if (typeof hp.getVideoHLS === 'function') report(hp.getVideoHLS(), 'application/x-mpegurl', '', '', 0, 'HLS Adaptive', '');
+                            if (hp.video_url) report(hp.video_url, 'video/mp4', '', '', 0, '', '');
+                            if (hp.video_url_high) report(hp.video_url_high, 'video/mp4', '', '', 0, 'High', '720p');
+                            if (hp.video_url_low) report(hp.video_url_low, 'video/mp4', '', '', 0, 'Low', '360p');
+                            if (hp.hls_url) report(hp.hls_url, 'application/x-mpegurl', '', '', 0, 'HLS', '');
+                        }
+
+                        if (typeof window.jwplayer === 'function') {
+                            try {
+                                var jw = window.jwplayer();
+                                if (jw && typeof jw.getPlaylist === 'function') {
+                                    var pl = jw.getPlaylist();
+                                    if (pl && pl.length) {
+                                        for (var p = 0; p < pl.length; p++) {
+                                            var item = pl[p];
+                                            var sources = item.sources || [];
+                                            for (var s = 0; s < sources.length; s++) {
+                                                var srcItem = sources[s];
+                                                if (srcItem.file) {
+                                                    report(srcItem.file, srcItem.type || 'video/mp4', item.title || '', item.image || '', 0, srcItem.label || '', '');
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch(_) {}
+                        }
+
+                        if (typeof window.videojs === 'function' && window.videojs.players) {
+                            try {
+                                var players = window.videojs.players;
+                                for (var key in players) {
+                                    if (players.hasOwnProperty(key)) {
+                                        var vp = players[key];
+                                        if (vp && typeof vp.currentSources === 'function') {
+                                            var cSources = vp.currentSources();
+                                            if (Array.isArray(cSources)) {
+                                                for (var cs = 0; cs < cSources.length; cs++) {
+                                                    if (cSources[cs].src) report(cSources[cs].src, cSources[cs].type || 'video/mp4', '', '', 0, '', '');
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch(_) {}
+                        }
+
+                        var scripts = document.getElementsByTagName('script');
+                        for (var sc = 0; sc < scripts.length; sc++) {
+                            var content = scripts[sc].textContent || '';
+                            if (!content || content.length < 20 || content.length > 300000) continue;
+
+                            var highMatch = content.match(/setVideoUrlHigh\s*\(\s*['"]([^'"]+)['"]/);
+                            if (highMatch && highMatch[1]) report(highMatch[1], 'video/mp4', '', '', 0, 'High', '720p');
+
+                            var lowMatch = content.match(/setVideoUrlLow\s*\(\s*['"]([^'"]+)['"]/);
+                            if (lowMatch && lowMatch[1]) report(lowMatch[1], 'video/mp4', '', '', 0, 'Low', '360p');
+
+                            var hlsMatch = content.match(/setVideoHLS\s*\(\s*['"]([^'"]+)['"]/);
+                            if (hlsMatch && hlsMatch[1]) report(hlsMatch[1], 'application/x-mpegurl', '', '', 0, 'HLS Adaptive', '');
+
+                            var fileRegex = /['"]file['"]\s*:\s*['"](https?:\\?\/\\?[^'"]+\.(?:mp4|webm|m3u8)[^'"]*)['"]/g;
+                            var fm;
+                            while ((fm = fileRegex.exec(content)) !== null) {
+                                var fUrl = fm[1].replace(/\\\//g, '/');
+                                report(fUrl, fUrl.indexOf('.m3u8') !== -1 ? 'application/x-mpegurl' : 'video/mp4', '', '', 0, '', '');
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                function scanAll() {
                     try {
                         var videos = document.getElementsByTagName('video');
-                        for (var i = 0; i < videos.length; i++) {
-                            reportMedia(videos[i]);
-                        }
+                        for (var i = 0; i < videos.length; i++) scanElement(videos[i]);
                         var audios = document.getElementsByTagName('audio');
-                        for (var j = 0; j < audios.length; j++) {
-                            reportMedia(audios[j]);
-                        }
+                        for (var j = 0; j < audios.length; j++) scanElement(audios[j]);
+                        scanPlayerConfigs();
                     } catch(e) {}
                 }
 
                 // 1. Initial scan
-                scanMedia();
+                scanAll();
 
                 // 2. Intercept HTMLMediaElement play & load events safely
                 try {
                     var origPlay = HTMLMediaElement.prototype.play;
                     HTMLMediaElement.prototype.play = function() {
-                        reportMedia(this);
+                        scanElement(this);
                         return origPlay.apply(this, arguments);
                     };
                     var origLoad = HTMLMediaElement.prototype.load;
                     HTMLMediaElement.prototype.load = function() {
-                        reportMedia(this);
+                        scanElement(this);
                         return origLoad.apply(this, arguments);
                     };
                 } catch(e) {}
@@ -978,7 +892,7 @@ class VideoSnifferEngine(
                 try {
                     var pollCount = 0;
                     var pollInterval = setInterval(function() {
-                        scanMedia();
+                        scanAll();
                         pollCount++;
                         if (pollCount >= 10) {
                             clearInterval(pollInterval);

@@ -188,20 +188,15 @@ object HlsManifestParser {
                     val streamUrl = resolveUrl(baseUrl, currentLine)
                     val bandwidth = extractBandwidth(lastStreamInf)
                     val (w, h) = extractResolutionDimensions(lastStreamInf)
-                    val maxDim = max(w, h)
-                    val minDim = min(w, h)
-                    val isFhdOrHigher = minDim >= 1080 || maxDim >= 1920
-                    val normalizedW = if (isFhdOrHigher) 1920 else w
-                    val normalizedH = if (isFhdOrHigher) 1080 else h
-                    val resStr = if (normalizedW > 0 && normalizedH > 0) "${normalizedW}x${normalizedH}" else ""
-                    val label = formatQualityLabel(normalizedW, normalizedH, bandwidth)
+                    val resStr = if (w > 0 && h > 0) "${w}x${h}" else ""
+                    val label = formatQualityLabel(w, h, bandwidth)
 
                     rawVariants.add(
                         RawVariant(
                             url = streamUrl,
                             bandwidth = bandwidth,
-                            width = normalizedW,
-                            height = normalizedH,
+                            width = w,
+                            height = h,
                             resolution = resStr,
                             label = label
                         )
@@ -214,21 +209,14 @@ object HlsManifestParser {
                 return HlsParseResult(emptyList(), fallbackDurationSeconds)
             }
 
-            // Deduplicate: Group by standard resolution tier (1080p, 720p, 480p, 360p)
-            // and keep only the single highest bitrate variant per tier.
+            // Retain genuine server-provided variants:
+            // Deduplicate variants that share the same resolution or URL by keeping the highest bandwidth option
             val deduplicatedVariants = rawVariants
                 .groupBy { variant ->
-                    val minD = min(variant.width, variant.height)
-                    val maxD = max(variant.width, variant.height)
-                    when {
-                        minD >= 1080 || maxD >= 1920 || variant.bandwidth >= 4_000_000L -> "1080p"
-                        minD >= 720 || maxD >= 1280 || variant.bandwidth >= 2_000_000L -> "720p"
-                        minD >= 480 || maxD >= 854 || variant.bandwidth >= 900_000L -> "480p"
-                        else -> "360p"
-                    }
+                    if (variant.resolution.isNotEmpty()) variant.resolution else variant.url
                 }
-                .mapNotNull { (_, variantsInTier) ->
-                    variantsInTier.maxByOrNull { it.bandwidth }
+                .mapNotNull { (_, variantsInGroup) ->
+                    variantsInGroup.maxByOrNull { it.bandwidth }
                 }
                 .sortedByDescending { it.bandwidth }
 
@@ -249,11 +237,8 @@ object HlsManifestParser {
             for (variant in deduplicatedVariants) {
                 val estimatedSize = if (finalDuration > 0.0 && variant.bandwidth > 0L) {
                     ((variant.bandwidth * finalDuration) / 8.0).toLong()
-                } else if (variant.bandwidth > 0L) {
-                    // Fallback to standard 3-minute clip (180s)
-                    (variant.bandwidth * 180L) / 8L
                 } else {
-                    35 * 1024 * 1024L
+                    0L
                 }
 
                 results.add(
@@ -269,24 +254,6 @@ object HlsManifestParser {
                 )
             }
 
-            // Audio track extract
-            if (finalDuration > 0.0 || deduplicatedVariants.isNotEmpty()) {
-                val audioDuration = if (finalDuration > 0.0) finalDuration else 180.0
-                val audioBandwidth = 128_000L
-                val audioSize = ((audioBandwidth * audioDuration) / 8.0).toLong()
-                results.add(
-                    VideoQualityOption(
-                        label = "Audio Track Extract (AAC)",
-                        resolution = "Audio Only",
-                        bandwidthBps = audioBandwidth,
-                        url = deduplicatedVariants.lastOrNull()?.url ?: baseUrl,
-                        isHlsVariant = true,
-                        estimatedSizeBytes = audioSize,
-                        formatTag = "AUDIO"
-                    )
-                )
-            }
-
             val sortedResults = results.sortedByDescending { it.bandwidthBps }
             return HlsParseResult(sortedResults, finalDuration)
         }
@@ -297,60 +264,135 @@ object HlsManifestParser {
             val finalDuration = when {
                 segmentDuration > 0.0 -> segmentDuration
                 fallbackDurationSeconds > 0.0 -> fallbackDurationSeconds
-                else -> 180.0
+                else -> 0.0
             }
 
-            val qualityList = listOf(
-                VideoQualityOption(
-                    label = "1080p FHD (Adaptive Stream)",
-                    resolution = "1920x1080",
-                    bandwidthBps = 5_000_000L,
-                    url = baseUrl,
-                    isHlsVariant = true,
-                    estimatedSizeBytes = ((5_000_000L * finalDuration) / 8.0).toLong(),
-                    formatTag = "HLS M3U8"
-                ),
-                VideoQualityOption(
-                    label = "720p HD (Adaptive Stream)",
-                    resolution = "1280x720",
-                    bandwidthBps = 2_800_000L,
-                    url = baseUrl,
-                    isHlsVariant = true,
-                    estimatedSizeBytes = ((2_800_000L * finalDuration) / 8.0).toLong(),
-                    formatTag = "HLS M3U8"
-                ),
-                VideoQualityOption(
-                    label = "480p SD (Adaptive Stream)",
-                    resolution = "854x480",
-                    bandwidthBps = 1_200_000L,
-                    url = baseUrl,
-                    isHlsVariant = true,
-                    estimatedSizeBytes = ((1_200_000L * finalDuration) / 8.0).toLong(),
-                    formatTag = "HLS M3U8"
-                ),
-                VideoQualityOption(
-                    label = "360p Low (Adaptive Stream)",
-                    resolution = "640x360",
-                    bandwidthBps = 600_000L,
-                    url = baseUrl,
-                    isHlsVariant = true,
-                    estimatedSizeBytes = ((600_000L * finalDuration) / 8.0).toLong(),
-                    formatTag = "HLS M3U8"
-                ),
-                VideoQualityOption(
-                    label = "Audio Track Extract (AAC)",
-                    resolution = "Audio Only",
-                    bandwidthBps = 128_000L,
-                    url = baseUrl,
-                    isHlsVariant = true,
-                    estimatedSizeBytes = ((128_000L * finalDuration) / 8.0).toLong(),
-                    formatTag = "AUDIO"
-                )
+            // Calculate exact total size of actual segments
+            val segmentCount = countSegments(manifestText)
+            val byteRangeTotal = parseByteRangeTotalSize(manifestText)
+
+            val calculatedTotalSize = when {
+                byteRangeTotal > 0L -> byteRangeTotal
+                segmentCount > 0 -> {
+                    val firstSegUrl = extractFirstSegmentUrl(manifestText, baseUrl)
+                    val firstSegSize = if (firstSegUrl.isNotBlank()) probeSegmentSize(firstSegUrl, headersMap) else 0L
+                    if (firstSegSize > 0L) firstSegSize * segmentCount else 0L
+                }
+                else -> 0L
+            }
+
+            // Probe or infer actual video resolution from URL / manifest text
+            val (detectedRes, detectedLabel) = inferMediaPlaylistResolution(baseUrl, manifestText)
+
+            val calculatedBandwidth = if (finalDuration > 0.0 && calculatedTotalSize > 0L) {
+                (calculatedTotalSize * 8 / finalDuration).toLong()
+            } else {
+                0L
+            }
+
+            val singleTier = VideoQualityOption(
+                label = detectedLabel,
+                resolution = detectedRes,
+                bandwidthBps = calculatedBandwidth,
+                url = baseUrl,
+                isHlsVariant = true,
+                estimatedSizeBytes = calculatedTotalSize,
+                formatTag = "HLS M3U8"
             )
-            return HlsParseResult(qualityList, finalDuration)
+
+            return HlsParseResult(listOf(singleTier), finalDuration)
         }
 
         return HlsParseResult(emptyList(), fallbackDurationSeconds)
+    }
+
+    private fun countSegments(manifestText: String): Int {
+        var count = 0
+        manifestText.lineSequence().forEach { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("#EXTINF:")) {
+                count++
+            }
+        }
+        return count
+    }
+
+    private fun parseByteRangeTotalSize(manifestText: String): Long {
+        var total = 0L
+        val regex = """#EXT-X-BYTERANGE:(\d+)""".toRegex()
+        manifestText.lineSequence().forEach { line ->
+            val trimmed = line.trim()
+            if (trimmed.startsWith("#EXT-X-BYTERANGE:")) {
+                regex.find(trimmed)?.groupValues?.get(1)?.toLongOrNull()?.let {
+                    total += it
+                }
+            }
+        }
+        return total
+    }
+
+    private fun extractFirstSegmentUrl(manifestText: String, baseUrl: String): String {
+        val lines = manifestText.lines()
+        for (i in lines.indices) {
+            val line = lines[i].trim()
+            if (line.startsWith("#EXTINF:") && i + 1 < lines.size) {
+                for (j in (i + 1) until lines.size) {
+                    val nextLine = lines[j].trim()
+                    if (nextLine.isNotEmpty() && !nextLine.startsWith("#")) {
+                        return resolveUrl(baseUrl, nextLine)
+                    }
+                }
+            }
+        }
+        return ""
+    }
+
+    private fun probeSegmentSize(segmentUrl: String, headersMap: Map<String, String>): Long {
+        return try {
+            val headers = buildHeaders(headersMap)
+            val request = Request.Builder()
+                .url(segmentUrl)
+                .head()
+                .headers(headers)
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    response.header("Content-Length")?.toLongOrNull() ?: 0L
+                } else 0L
+            }
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    private fun inferMediaPlaylistResolution(baseUrl: String, manifestText: String): Pair<String, String> {
+        val combined = (baseUrl + " " + manifestText.take(500)).lowercase()
+
+        // Check dimension patterns: e.g. 1920x1080, 1280x720, 640x360, 426x240
+        val dimRegex = """(\d{3,4})x(\d{3,4})""".toRegex()
+        val dimMatch = dimRegex.find(combined)
+        if (dimMatch != null) {
+            val w = dimMatch.groupValues[1].toIntOrNull() ?: 0
+            val h = dimMatch.groupValues[2].toIntOrNull() ?: 0
+            if (w > 0 && h > 0) {
+                val label = formatQualityLabel(w, h, 0L)
+                return Pair("${w}x${h}", label)
+            }
+        }
+
+        // Check height patterns: e.g. 2160p, 1440p, 1080p, 720p, 480p, 360p, 250p, 240p
+        val pRegex = """(?:hls_|video_|_|/)(\d{3,4})p\b""".toRegex()
+        val pMatch = pRegex.find(combined)
+        if (pMatch != null) {
+            val h = pMatch.groupValues[1].toIntOrNull() ?: 0
+            if (h > 0) {
+                val label = formatQualityLabel(0, h, 0L)
+                return Pair("${h}p", label)
+            }
+        }
+
+        return Pair("", "Direct Stream")
     }
 
     private fun fetchMediaPlaylistDuration(
@@ -407,16 +449,21 @@ object HlsManifestParser {
         val minDim = min(width, height)
 
         val quality = when {
+            maxDim >= 3840 || minDim >= 2160 -> "4K UHD"
+            maxDim >= 2560 || minDim >= 1440 -> "1440p 2K"
             maxDim >= 1920 || minDim >= 1080 -> "1080p FHD"
             maxDim >= 1280 || minDim >= 720 -> "720p HD"
             maxDim >= 854 || minDim >= 480 -> "480p SD"
             maxDim >= 640 || minDim >= 360 -> "360p"
             minDim > 0 -> "${minDim}p"
-            bandwidth >= 4_500_000 -> "1080p FHD"
-            bandwidth >= 2_200_000 -> "720p HD"
-            bandwidth >= 900_000 -> "480p SD"
-            bandwidth >= 400_000 -> "360p"
-            else -> "Adaptive Stream"
+            bandwidth >= 12_000_000L -> "4K UHD"
+            bandwidth >= 7_000_000L -> "1440p 2K"
+            bandwidth >= 4_500_000L -> "1080p FHD"
+            bandwidth >= 2_200_000L -> "720p HD"
+            bandwidth >= 900_000L -> "480p SD"
+            bandwidth >= 400_000L -> "360p"
+            bandwidth > 0L -> "${bandwidth / 1000} kbps"
+            else -> "Variant Stream"
         }
 
         val resStr = if (width > 0 && height > 0) "${width}x${height}" else ""

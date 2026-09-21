@@ -55,14 +55,16 @@ data class SniffedMediaItem(
             val lower = (title + " " + url).lowercase()
             return when {
                 mimeType.contains("audio", ignoreCase = true) -> "AUDIO"
-                lower.contains("1080") ||
-                        lower.contains("4k") || lower.contains("2160") ||
-                        lower.contains("2k") || lower.contains("1440") -> "1080p FHD"
+                lower.contains("4k") || lower.contains("2160") -> "4K UHD"
+                lower.contains("2k") || lower.contains("1440") -> "1440p 2K"
+                lower.contains("1080") -> "1080p FHD"
                 lower.contains("720") -> "720p HD"
                 lower.contains("480") -> "480p SD"
-                lower.contains("360") -> "360p"
-                isM3u8 -> "1080p FHD"
-                else -> "1080p FHD"
+                lower.contains("360") -> "360p Low"
+                lower.contains("250") -> "250p"
+                lower.contains("240") -> "240p"
+                isM3u8 -> "HLS Stream"
+                else -> "Video"
             }
         }
 
@@ -71,15 +73,11 @@ data class SniffedMediaItem(
             if (fileSizeBytes > 0L) return fileSizeBytes
             val qualitySize = qualities.firstOrNull()?.estimatedSizeBytes ?: 0L
             if (qualitySize > 0L) return qualitySize
-            if (durationSeconds > 0.0) {
-                // Estimate based on standard 2.5 Mbps HD bitrate
-                return ((2_500_000L * durationSeconds) / 8.0).toLong()
-            }
-            return 35 * 1024 * 1024L
+            return 0L
         }
 
     val bestFormattedSize: String
-        get() = VideoQualityOption.formatFileSize(bestFileSizeBytes)
+        get() = if (bestFileSizeBytes > 0L) VideoQualityOption.formatFileSize(bestFileSizeBytes) else ""
 
     companion object {
         fun extractFileNameFromUrl(url: String): String {
