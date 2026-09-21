@@ -74,7 +74,7 @@ fun ActiveDownloadsScreen(
     onTogglePause: (DownloadTaskEntity) -> Unit,
     onToggleVault: (DownloadTaskEntity) -> Unit,
     onDelete: (DownloadTaskEntity) -> Unit,
-    onSimulate: () -> Unit
+    onSimulate: () -> Unit = {}
 ) {
     var showManualDialog by remember { mutableStateOf(false) }
 
@@ -88,22 +88,14 @@ fun ActiveDownloadsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.End
         ) {
             GlassButton(
                 text = "+ Add Task",
                 icon = Icons.Default.Add,
                 onClick = { showManualDialog = true },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 testTag = "add_download_button"
-            )
-            GlassButton(
-                text = "Simulate Speed",
-                icon = Icons.Default.Speed,
-                onClick = onSimulate,
-                isPrimary = false,
-                modifier = Modifier.weight(1f),
-                testTag = "simulate_speed_button"
             )
         }
 

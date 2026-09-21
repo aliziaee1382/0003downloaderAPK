@@ -51,9 +51,8 @@ class VaultManager(context: Context) {
     }
 
     fun isVaultConfigured(): Boolean {
-        val hasPin = prefs.getBoolean(KEY_VAULT_SET_UP, false) && prefs.getString(KEY_PIN_HASH, null) != null
-        val hasBiometric = isBiometricRegistered()
-        return hasPin || hasBiometric
+        // A vault is ONLY configured if a valid 4-digit PIN has been explicitly set and hashed
+        return prefs.getBoolean(KEY_VAULT_SET_UP, false) && prefs.getString(KEY_PIN_HASH, null) != null
     }
 
     fun setupPin(pin: String): Boolean {
@@ -74,6 +73,7 @@ class VaultManager(context: Context) {
 
     fun verifyPin(pin: String): Boolean {
         if (!isVaultConfigured()) return false
+        if (pin.length != 4 || !pin.all { it.isDigit() }) return false
         val salt = prefs.getString(KEY_SALT, "") ?: ""
         val savedHash = prefs.getString(KEY_PIN_HASH, null) ?: return false
         val inputHash = hashPin(pin, salt)
@@ -96,7 +96,6 @@ class VaultManager(context: Context) {
         prefs.edit()
             .putBoolean(KEY_BIOMETRIC_REGISTERED, true)
             .putBoolean(KEY_BIOMETRIC_ENABLED, true)
-            .putBoolean(KEY_VAULT_SET_UP, true)
             .apply()
         _isVaultUnlocked.value = true
         _failedAttempts.value = 0

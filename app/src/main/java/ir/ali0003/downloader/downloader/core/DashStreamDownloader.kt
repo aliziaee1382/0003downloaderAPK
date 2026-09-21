@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.downloader.model.DownloadProgress
-import ir.ali0003.downloader.downloader.muxer.DashStreamMuxer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -23,7 +22,7 @@ import java.util.concurrent.atomic.AtomicLong
  * High-performance DASH and Separated Audio-Video Stream Downloader.
  *
  * Downloads separated video and audio payloads concurrently into temporary scratch files
- * (temp_vid.mp4 and temp_aud.m4a), and automatically triggers [DashStreamMuxer]
+ * (temp_vid.mp4 and temp_aud.m4a), and automatically triggers [HardwareMediaMuxer]
  * to multiplex them into a single synchronized MP4 container.
  */
 class DashStreamDownloader(
@@ -175,7 +174,7 @@ class DashStreamDownloader(
             }
 
             val downloadedTotal = totalDownloadedAtomic.get()
-            Log.d(TAG, "DASH stream downloads finished ($downloadedTotal bytes). Triggering native DashStreamMuxer...")
+            Log.d(TAG, "DASH stream downloads finished ($downloadedTotal bytes). Triggering native HardwareMediaMuxer...")
 
             // Emit download completion status before starting muxer
             emit(
@@ -189,9 +188,9 @@ class DashStreamDownloader(
                 )
             )
 
-            // 2. Multiplex visual & acoustic tracks with Media3 Transformer
-            val muxer = DashStreamMuxer.getInstance(context)
-            val muxSuccess = muxer.muxVideoAndAudio(
+            // 2. Multiplex visual & acoustic tracks with HardwareMediaMuxer
+            val muxer = HardwareMediaMuxer.getInstance(context)
+            val muxSuccess = muxer.muxAudioAndVideo(
                 videoFile = tempVidFile,
                 audioFile = tempAudFile,
                 outputFile = outputFile,
@@ -201,7 +200,7 @@ class DashStreamDownloader(
             )
 
             if (!muxSuccess || !outputFile.exists() || outputFile.length() == 0L) {
-                throw IOException("DashStreamMuxer failed to generate synchronized MP4 container at ${outputFile.absolutePath}")
+                throw IOException("HardwareMediaMuxer failed to generate synchronized MP4 container at ${outputFile.absolutePath}")
             }
 
             Log.d(TAG, "DASH muxing completed successfully: ${outputFile.name} (${outputFile.length()} bytes)")

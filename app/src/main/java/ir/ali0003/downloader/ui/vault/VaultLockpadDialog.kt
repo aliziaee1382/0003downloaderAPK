@@ -69,7 +69,11 @@ fun VaultLockpadDialog(
     onBiometricClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var showPinFallback by remember { mutableStateOf(!isBiometricSupported && isConfigured) }
+    // If not configured, user MUST create a 4-digit PIN first.
+    // If configured and biometric is registered and supported, biometric screen is shown unless user taps PIN.
+    var showPinFallback by remember(isConfigured) {
+        mutableStateOf(!isConfigured || !isBiometricSupported || !isBiometricRegistered)
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -386,7 +390,7 @@ fun VaultLockpadDialog(
                             Spacer(modifier = Modifier.height(10.dp))
                         }
 
-                        if (isBiometricSupported) {
+                        if (isBiometricSupported && isConfigured && isBiometricRegistered) {
                             Spacer(modifier = Modifier.height(6.dp))
                             Box(
                                 modifier = Modifier

@@ -6,8 +6,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import ir.ali0003.downloader.browser.model.SniffedMediaItem
 import ir.ali0003.downloader.browser.model.VideoQualityOption
-import ir.ali0003.downloader.browser.sniffer.ExtractedVideoResult
-import ir.ali0003.downloader.browser.sniffer.LocalVideoExtractor
 import ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine
 import ir.ali0003.downloader.data.local.AppDatabase
 import ir.ali0003.downloader.data.local.WebShortcutEntity
@@ -196,9 +194,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _currentUrl.value = processed
         _lastActiveUrl.value = processed
         clearSniffedMedia()
-        if (!processed.contains("google.com/search")) {
-            extractMediaWithNativeEngine(processed)
-        }
     }
 
     fun resetToHome() {
@@ -249,38 +244,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         historyList.removeAll { it.url == url }
         historyList.add(0, entry)
         _history.value = historyList.take(50)
-
-        // Trigger LocalVideoExtractor for robust native extraction
-        extractMediaWithNativeEngine(url)
     }
 
-    private var nativeExtractionJob: Job? = null
     private val _isExtractingNativeMedia = MutableStateFlow(false)
     val isExtractingNativeMedia: StateFlow<Boolean> = _isExtractingNativeMedia.asStateFlow()
-
-    fun extractMediaWithNativeEngine(url: String) {
-        if (!LocalVideoExtractor.shouldAttemptExtraction(url)) return
-
-        nativeExtractionJob?.cancel()
-        nativeExtractionJob = viewModelScope.launch(Dispatchers.IO) {
-            _isExtractingNativeMedia.value = true
-            try {
-                when (val result = LocalVideoExtractor.extractMediaInfo(url)) {
-                    is ExtractedVideoResult.Success -> {
-                        _sniffedMediaList.value = listOf(result.sniffedMediaItem)
-                        _selectedMedia.value = result.sniffedMediaItem
-                    }
-                    is ExtractedVideoResult.Error -> {
-                        // Fallback remains with whatever webview intercepted, or clean empty
-                    }
-                }
-            } catch (_: Exception) {
-                // Ignore cancellation or exceptions safely
-            } finally {
-                _isExtractingNativeMedia.value = false
-            }
-        }
-    }
 
     fun onProgressChanged(progress: Int) {
         _loadProgress.value = progress
@@ -321,7 +288,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun clearSniffedMedia() {
-        nativeExtractionJob?.cancel()
         _isExtractingNativeMedia.value = false
         _sniffedMediaList.value = emptyList()
         _selectedMedia.value = null
@@ -367,16 +333,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
 
-            // Populate headers JSON with YoutubeDL metadata for automatic native muxing
+            // Populate headers JSON
             val headersObj = try {
                 JSONObject(mediaItem.headersJson)
             } catch (_: Exception) {
                 JSONObject()
             }
-            if (selectedQuality?.isYoutubeDl == true || !selectedQuality?.formatId.isNullOrBlank()) {
-                headersObj.put("isYoutubeDl", true)
-                headersObj.put("formatId", selectedQuality?.formatId ?: "best")
-                headersObj.put("webpageUrl", mediaItem.pageUrl.ifBlank { mediaItem.url })
+            if (mediaItem.pageUrl.isNotBlank()) {
+                headersObj.put("webpageUrl", mediaItem.pageUrl)
             }
 
             downloadRepository.enqueueDownload(

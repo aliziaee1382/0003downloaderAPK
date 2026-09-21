@@ -310,47 +310,7 @@ fun ManualDownloadUrlDialog(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    // Quick Sample Link Chips (for rapid testing)
-                    Text(
-                        text = "Quick Samples",
-                        color = GlassTheme.colors.textMuted,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        QuickSampleChip(
-                            label = "MP4 Video",
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                urlInput = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-                                errorMessage = null
-                            }
-                        )
-                        QuickSampleChip(
-                            label = "HLS Stream",
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                urlInput = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
-                                errorMessage = null
-                            }
-                        )
-                        QuickSampleChip(
-                            label = "DASH A+V Mux",
-                            modifier = Modifier.weight(1f),
-                            onClick = {
-                                urlInput = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4|https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"
-                                errorMessage = null
-                            }
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(20.dp))
+                    Spacer(modifier = Modifier.height(18.dp))
 
                     // Action Button: "Inspect & Download"
                     GlassButton(
@@ -393,31 +353,5 @@ fun ManualDownloadUrlDialog(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun QuickSampleChip(
-    label: String,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(GlassTheme.colors.surfaceGlassSubtle)
-            .border(1.dp, GlassTheme.colors.glassBorder, RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(vertical = 6.dp, horizontal = 8.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = label,
-            color = GlassTheme.colors.textSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }

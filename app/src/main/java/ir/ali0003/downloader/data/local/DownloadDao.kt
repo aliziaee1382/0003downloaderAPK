@@ -48,6 +48,9 @@ interface DownloadDao {
     @Query("DELETE FROM download_tasks WHERE id = :id")
     suspend fun deleteDownloadById(id: Long)
 
+    @Query("DELETE FROM download_tasks WHERE id IN (1, 2, 3)")
+    suspend fun deleteSeedTasks()
+
     @Query("DELETE FROM download_tasks WHERE isHidden = 1")
     suspend fun deleteAllVaultDownloads()
 

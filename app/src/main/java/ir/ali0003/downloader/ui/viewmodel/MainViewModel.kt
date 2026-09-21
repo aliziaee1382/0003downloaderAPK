@@ -94,7 +94,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var simulationJob: Job? = null
 
     init {
-        seedInitialDataIfEmpty()
+        purgeDemoSeedData()
     }
 
     fun applyTheme(mode: ThemeMode, colorKey: String) {
@@ -197,6 +197,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun registerBiometricAndUnlock() {
+        if (!vaultManager.isVaultConfigured()) {
+            _showVaultAuthDialog.value = true
+            return
+        }
         vaultManager.markBiometricRegistered()
         _pinInput.value = ""
         _pinErrorMessage.value = null
@@ -204,6 +208,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun unlockWithBiometrics() {
+        if (!vaultManager.isVaultConfigured()) {
+            _showVaultAuthDialog.value = true
+            return
+        }
         vaultManager.unlockWithBiometrics()
         _pinInput.value = ""
         _pinErrorMessage.value = null
@@ -233,6 +241,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleVaultHidden(task: DownloadTaskEntity) {
+        if (!task.isHidden && !vaultManager.isVaultConfigured()) {
+            _showVaultAuthDialog.value = true
+        }
         viewModelScope.launch {
             if (task.isHidden) {
                 vaultFileManager.unhideFromVault(task)
@@ -338,59 +349,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun seedInitialDataIfEmpty() {
+    private fun purgeDemoSeedData() {
         viewModelScope.launch {
-            val existing = repository.findDownloadById(1L)
-            if (existing == null) {
-                repository.insertTasks(
-                    listOf(
-                        DownloadTaskEntity(
-                            id = 1L,
-                            url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                            websiteUrl = "https://videoshare.io/watch?v=9283",
-                            fileName = "Emerald_Waves_Cinematic_4K.mp4",
-                            mimeType = "video/mp4",
-                            totalBytes = 64L * 1024L * 1024L,
-                            downloadedBytes = 38L * 1024L * 1024L,
-                            status = DownloadStatus.DOWNLOADING,
-                            speedBps = 3L * 1024L * 1024L,
-                            isM3u8 = false,
-                            isHidden = false,
-                            createdAt = System.currentTimeMillis() - 120_000
-                        ),
-                        DownloadTaskEntity(
-                            id = 2L,
-                            url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-                            websiteUrl = "https://synthstream.net/live",
-                            fileName = "Cyber_Amethyst_Concert.mp4",
-                            mimeType = "video/mp4",
-                            totalBytes = 120L * 1024L * 1024L,
-                            downloadedBytes = 120L * 1024L * 1024L,
-                            status = DownloadStatus.COMPLETED,
-                            speedBps = 0L,
-                            isM3u8 = false,
-                            isHidden = false,
-                            createdAt = System.currentTimeMillis() - 86_400_000,
-                            completedAt = System.currentTimeMillis() - 86_000_000
-                        ),
-                        DownloadTaskEntity(
-                            id = 3L,
-                            url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-                            websiteUrl = "https://securematrix.io/archive",
-                            fileName = "Confidential_Archive_Matrix_Raw.mp4",
-                            mimeType = "video/mp4",
-                            totalBytes = 250L * 1024L * 1024L,
-                            downloadedBytes = 250L * 1024L * 1024L,
-                            status = DownloadStatus.COMPLETED,
-                            speedBps = 0L,
-                            isM3u8 = false,
-                            isHidden = true,
-                            createdAt = System.currentTimeMillis() - 172_800_000,
-                            completedAt = System.currentTimeMillis() - 172_000_000
-                        )
-                    )
-                )
-            }
+            repository.deleteSeedTasks()
         }
     }
 }

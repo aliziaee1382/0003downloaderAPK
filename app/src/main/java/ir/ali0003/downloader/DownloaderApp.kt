@@ -4,24 +4,14 @@ import android.app.Application
 import android.os.Build
 import android.util.Log
 import android.webkit.WebView
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.youtubedl_android.YoutubeDL
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import java.io.File
 
 class DownloaderApp : Application() {
 
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
     override fun onCreate() {
         super.onCreate()
         initWebViewEnvironment()
-        applicationScope.launch {
-            initYoutubeDLEngine()
-        }
+        Log.i(TAG, "DownloaderApp initialized with lean native pipeline")
     }
 
     private fun initWebViewEnvironment() {
@@ -62,17 +52,7 @@ class DownloaderApp : Application() {
         }
     }
 
-    private fun initYoutubeDLEngine() {
-        try {
-            YoutubeDL.getInstance().init(applicationContext)
-            FFmpeg.getInstance().init(applicationContext)
-            Log.d(TAG, "YoutubeDL and FFmpeg successfully initialized")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize native libraries", e)
-        }
-    }
-
     companion object {
-        private const val TAG = "YoutubeDL"
+        private const val TAG = "DownloaderApp"
     }
 }

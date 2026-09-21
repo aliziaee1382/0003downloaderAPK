@@ -40,6 +40,7 @@ interface DownloadRepository {
     suspend fun markFailed(id: Long)
     suspend fun setHidden(id: Long, isHidden: Boolean)
     suspend fun deleteDownload(id: Long)
+    suspend fun deleteSeedTasks()
     suspend fun deleteAllVaultDownloads()
 }
 
@@ -154,6 +155,10 @@ class DownloadRepositoryImpl(
 
     override suspend fun deleteDownload(id: Long) {
         downloadDao.deleteDownloadById(id)
+    }
+
+    override suspend fun deleteSeedTasks() {
+        downloadDao.deleteSeedTasks()
     }
 
     override suspend fun deleteAllVaultDownloads() {
