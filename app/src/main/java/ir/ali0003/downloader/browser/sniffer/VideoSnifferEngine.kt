@@ -214,6 +214,21 @@ class VideoSnifferEngine(
                 url.contains("-frag-", ignoreCase = true)
     }
 
+    private fun isThumbnailOrPreviewUrl(url: String): Boolean {
+        val clean = url.substringBefore('?').substringBefore('#').lowercase()
+        val full = url.lowercase()
+        return clean.contains("preview") ||
+                clean.contains("thumb") ||
+                clean.contains("teaser") ||
+                clean.contains("trailer_preview") ||
+                clean.contains("story_preview") ||
+                clean.contains("hover_preview") ||
+                clean.contains("short_loop") ||
+                clean.contains("micro_clip") ||
+                full.contains("preview=true") ||
+                full.contains("type=preview")
+    }
+
     private fun isMediaUrl(url: String, requestHeaders: Map<String, String>): Boolean {
         if (isAdOrJunkUrl(url)) return false
 
@@ -322,9 +337,31 @@ class VideoSnifferEngine(
                 detectedSize = probe.sizeBytes
                 probe.mimeType?.let { if (it.isNotBlank()) detectedMime = it }
 
+                val isAudio = detectedMime.contains("audio", ignoreCase = true) ||
+                        mediaUrl.contains(".mp3", ignoreCase = true) ||
+                        mediaUrl.contains(".m4a", ignoreCase = true)
+
+                // Filter Out Micro-Clips & Thumbnail Previews:
+                // Discard background preview MP4s matching common patterns under 1 MB
+                val isPreview = isThumbnailOrPreviewUrl(mediaUrl)
+                if (!isAudio && isPreview && (detectedSize in 0 until (1024 * 1024L) || (finalDuration in 0.001..9.999))) {
+                    return@launch
+                }
+
+                // If a full media item already exists on page (>= 1.5 MB or duration >= 10s), discard incoming micro-clips
+                val hasExistingFullVideo = synchronized(aggregationLock) {
+                    val prev = canonicalVideoItem
+                    prev != null && !prev.mimeType.contains("audio", ignoreCase = true) &&
+                            (prev.fileSizeBytes >= 1536 * 1024L || prev.durationSeconds >= 10.0)
+                }
+
+                if (!isAudio && hasExistingFullVideo && (detectedSize in 1 until (1536 * 1024L) || (finalDuration in 0.001..9.999))) {
+                    return@launch
+                }
+
                 val formatTag = when {
                     detectedMime.contains("webm", ignoreCase = true) || mediaUrl.contains(".webm", ignoreCase = true) -> "WEBM"
-                    detectedMime.contains("audio", ignoreCase = true) || mediaUrl.contains(".mp3", ignoreCase = true) || mediaUrl.contains(".m4a", ignoreCase = true) -> "AUDIO"
+                    isAudio -> "AUDIO"
                     else -> "MP4"
                 }
 
@@ -343,16 +380,36 @@ class VideoSnifferEngine(
 
             // UNIFIED AGGREGATION & CANONICAL MERGE
             val aggregatedCanonical: SniffedMediaItem = synchronized(aggregationLock) {
+                val previous = canonicalVideoItem
+                val isAudioItem = detectedMime.contains("audio", ignoreCase = true) ||
+                        mediaUrl.contains(".mp3", ignoreCase = true) ||
+                        mediaUrl.contains(".m4a", ignoreCase = true)
+
+                val isIncomingSubstantial = detectedSize >= 1536 * 1024L || finalDuration >= 10.0 || isAudioItem
+                val wasPreviousMicroClip = previous != null &&
+                        !previous.mimeType.contains("audio", ignoreCase = true) &&
+                        previous.fileSizeBytes in 1 until (1536 * 1024L) &&
+                        (previous.durationSeconds == 0.0 || previous.durationSeconds < 10.0)
+
+                // If a genuine full video arrives and previous was merely a micro-clip, purge previous micro-clips
+                if (wasPreviousMicroClip && isIncomingSubstantial && !isAudioItem) {
+                    accumulatedRawQualities.clear()
+                }
+
                 accumulatedHeaders.putAll(fullHeaders)
                 accumulatedRawQualities.addAll(qualities)
 
-                val previous = canonicalVideoItem
+                // Preference for Clean Progressive MP4 over Raw HLS Sub-playlists
+                val hasIncomingProgressiveMp4 = !isM3u8 && !isDash && !isAudioItem && detectedSize >= 1536 * 1024L
+                val previousHasOnlyVagueHls = previous?.isM3u8 == true &&
+                        previous.qualities.all { it.label.contains("Direct Stream", ignoreCase = true) || it.resolution.isBlank() }
 
-                // Prioritize HLS master manifest over loose MP4 fragments
                 val shouldUseAsMasterUrl = when {
                     previous == null -> true
-                    isM3u8 -> true // HLS always supersedes loose MP4 fragments
-                    !previous.isM3u8 && detectedSize > previous.fileSizeBytes -> true
+                    hasIncomingProgressiveMp4 && previousHasOnlyVagueHls -> true
+                    hasIncomingProgressiveMp4 && previous.fileSizeBytes < detectedSize -> true
+                    isM3u8 && qualities.any { it.resolution.isNotBlank() } && !previous.isM3u8 -> true
+                    detectedSize > previous.fileSizeBytes -> true
                     else -> false
                 }
 
@@ -600,20 +657,166 @@ class VideoSnifferEngine(
             )
         }
 
-        // Retain genuine server-provided variants:
-        // Deduplicate variants that point to the exact same URL, keeping the one with probed file size
-        val deduplicated = rawQualities
-            .groupBy { it.url }
+        // 1. Aggressive Deduplication by clean URL (eliminate duplicate query/hash variations)
+        val urlDeduplicated = rawQualities
+            .groupBy { it.url.substringBefore('?').substringBefore('#') }
             .mapNotNull { (_, optionsForUrl) ->
-                optionsForUrl.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
+                // Keep option with highest verified size, bandwidth, or progressive MP4 preference
+                optionsForUrl.maxWithOrNull(
+                    compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
+                        .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                )
             }
 
-        // Sort descending by resolution height / bandwidth / size
-        return deduplicated.sortedWith(
+        // 2. Filter Out Micro-Clips & Thumbnail Previews
+        val hasFullVideo = urlDeduplicated.any { opt ->
+            val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
+            !isAudio && (opt.estimatedSizeBytes >= 1536 * 1024L || (durationSeconds >= 10.0 && opt.estimatedSizeBytes > 0L)) && !isThumbnailOrPreviewUrl(opt.url)
+        }
+
+        val postClipFilter = if (hasFullVideo) {
+            urlDeduplicated.filterNot { opt ->
+                val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
+                if (isAudio) return@filterNot false
+                val isPreview = isThumbnailOrPreviewUrl(opt.url) || isThumbnailOrPreviewUrl(opt.label)
+                val isUnderSize = opt.estimatedSizeBytes in 1 until (1536 * 1024L)
+                val isShort = durationSeconds in 0.001..9.999
+                isPreview || isUnderSize || isShort
+            }
+        } else {
+            // Standalone video or audio item: filter out background previews matching common patterns under 1 MB
+            urlDeduplicated.filterNot { opt ->
+                val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
+                if (isAudio) return@filterNot false
+                val isPreview = isThumbnailOrPreviewUrl(opt.url) || isThumbnailOrPreviewUrl(opt.label)
+                isPreview && (opt.estimatedSizeBytes in 0 until (1024 * 1024L))
+            }
+        }
+
+        // 3. Preference for Clean Progressive MP4 over Raw HLS Sub-playlists
+        val progressiveMp4s = postClipFilter.filter {
+            !it.isHlsVariant && !it.formatTag.contains("AUDIO", ignoreCase = true) &&
+                    (it.resolution.isNotBlank() || !it.label.contains("Direct Stream", ignoreCase = true))
+        }
+        val hasProgressiveMp4 = progressiveMp4s.isNotEmpty()
+        val hasNamedVideoOptions = postClipFilter.any {
+            !it.formatTag.contains("AUDIO", ignoreCase = true) &&
+                    it.resolution.isNotBlank() &&
+                    !it.label.contains("Direct Stream", ignoreCase = true)
+        }
+
+        val cleanStreamList = postClipFilter.filterNot { opt ->
+            val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
+            if (isAudio) return@filterNot false
+
+            // If progressive MP4 direct links exist, suppress redundant HLS sub-variants named vaguely as "Direct Stream"
+            if (hasProgressiveMp4 && opt.isHlsVariant && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.resolution.isBlank())) {
+                return@filterNot true
+            }
+
+            // If HLS is used or other named options exist, hide unlabeled intermediate playlist chunks
+            if (hasNamedVideoOptions && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.resolution.isBlank() || opt.label.equals("Variant Stream", ignoreCase = true))) {
+                return@filterNot true
+            }
+
+            false
+        }
+
+        // 4. Strict Deduplication by Resolution Tier & File Size (Never allow identical resolutions with the same file size to render twice)
+        val audioOptions = cleanStreamList.filter {
+            it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
+        }
+        val videoOptions = cleanStreamList.filterNot {
+            it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
+        }
+
+        val distinctVideoTiers = videoOptions
+            .groupBy { getResolutionTierKey(it) }
+            .mapNotNull { (_, optionsInTier) ->
+                optionsInTier.maxWithOrNull(
+                    // Prefer progressive MP4 over HLS
+                    compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
+                        // Prefer option with probed file size
+                        .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                        // Prefer higher bandwidth or size
+                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                )
+            }
+
+        // Filter out any option that duplicates an already-represented resolution OR file size
+        val uniqueVideoOptions = mutableListOf<VideoQualityOption>()
+        val seenResolutions = mutableSetOf<String>()
+        val seenExactSizes = mutableSetOf<Long>()
+
+        val sortedCandidates = distinctVideoTiers.sortedWith(
             compareByDescending<VideoQualityOption> { extractHeightForSorting(it) }
                 .thenByDescending { it.bandwidthBps }
                 .thenByDescending { it.estimatedSizeBytes }
         )
+
+        for (opt in sortedCandidates) {
+            val resKey = getResolutionTierKey(opt)
+            if (resKey.isNotBlank() && resKey != "VIDEO" && seenResolutions.contains(resKey)) {
+                continue
+            }
+            if (opt.estimatedSizeBytes > 0L && seenExactSizes.contains(opt.estimatedSizeBytes)) {
+                // Same file size already represented in sheet
+                continue
+            }
+            if (resKey.isNotBlank() && resKey != "VIDEO") {
+                seenResolutions.add(resKey)
+            }
+            if (opt.estimatedSizeBytes > 0L) {
+                seenExactSizes.add(opt.estimatedSizeBytes)
+            }
+            uniqueVideoOptions.add(opt)
+        }
+
+        // 5. UI Cleanliness: Present a concise, unique list of 2 to 4 distinct qualities
+        // Sort: Highest resolution at top, down to lowest resolution, followed by Audio track at the bottom
+        val finalVideoList = if (uniqueVideoOptions.size > 4) uniqueVideoOptions.take(4) else uniqueVideoOptions
+        val bestAudioOption = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
+
+        val combinedResult = if (bestAudioOption != null && finalVideoList.size >= 4) {
+            finalVideoList.take(3) + bestAudioOption
+        } else if (bestAudioOption != null) {
+            finalVideoList + bestAudioOption
+        } else {
+            finalVideoList
+        }
+
+        return if (combinedResult.isNotEmpty()) {
+            combinedResult
+        } else {
+            listOf(
+                VideoQualityOption(
+                    label = if (isHls) "Direct Stream" else "Direct Video",
+                    resolution = "",
+                    bandwidthBps = 0L,
+                    url = fallbackUrl,
+                    isHlsVariant = isHls,
+                    estimatedSizeBytes = baseFileSizeBytes,
+                    formatTag = if (isHls) "HLS" else "MP4"
+                )
+            )
+        }
+    }
+
+    private fun getResolutionTierKey(opt: VideoQualityOption): String {
+        val h = extractHeightForSorting(opt)
+        return when {
+            h >= 2160 -> "2160p"
+            h >= 1440 -> "1440p"
+            h >= 1080 -> "1080p"
+            h >= 720 -> "720p"
+            h >= 480 -> "480p"
+            h >= 360 -> "360p"
+            h >= 240 -> "${h}p"
+            opt.cleanResolutionBadge.isNotBlank() -> opt.cleanResolutionBadge
+            opt.resolution.isNotBlank() -> opt.resolution
+            else -> opt.label
+        }
     }
 
     private fun extractHeightForSorting(option: VideoQualityOption): Int {

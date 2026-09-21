@@ -210,13 +210,31 @@ object HlsManifestParser {
             }
 
             // Retain genuine server-provided variants:
-            // Deduplicate variants that share the same resolution or URL by keeping the highest bandwidth option
+            // 1. Filter out preview/teaser variants if standard variants exist
+            // 2. Hide unlabeled intermediate playlist chunks if named variants exist
+            // 3. Deduplicate variants sharing the same resolution or clean URL, keeping highest bandwidth
+            val hasNamedVariants = rawVariants.any { it.resolution.isNotEmpty() }
+
             val deduplicatedVariants = rawVariants
+                .filterNot { variant ->
+                    val isPreview = variant.url.contains("preview", ignoreCase = true) ||
+                            variant.url.contains("thumb", ignoreCase = true) ||
+                            variant.label.contains("preview", ignoreCase = true)
+                    isPreview && rawVariants.any { !it.url.contains("preview", ignoreCase = true) }
+                }
+                .filterNot { variant ->
+                    hasNamedVariants && (variant.resolution.isEmpty() || variant.label.equals("Variant Stream", ignoreCase = true))
+                }
                 .groupBy { variant ->
-                    if (variant.resolution.isNotEmpty()) variant.resolution else variant.url
+                    val cleanUrl = variant.url.substringBefore('?').substringBefore('#')
+                    if (variant.resolution.isNotEmpty()) variant.resolution else cleanUrl
                 }
                 .mapNotNull { (_, variantsInGroup) ->
                     variantsInGroup.maxByOrNull { it.bandwidth }
+                }
+                .distinctBy { variant ->
+                    val cleanUrl = variant.url.substringBefore('?').substringBefore('#')
+                    if (variant.resolution.isNotEmpty()) variant.resolution else cleanUrl
                 }
                 .sortedByDescending { it.bandwidth }
 

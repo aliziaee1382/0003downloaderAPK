@@ -137,11 +137,12 @@ private fun DirectQualitySheetContent(
     val haptic = LocalHapticFeedback.current
 
     val qualityOptions = remember(mediaItem) {
-        if (mediaItem.qualities.isNotEmpty()) {
+        val raw = if (mediaItem.qualities.isNotEmpty()) {
             mediaItem.qualities
         } else {
             resolveComprehensiveQualities(mediaItem)
         }
+        deduplicateAndSortOptionsForSheet(raw)
     }
 
     var selectedOption by remember(qualityOptions) {
@@ -786,4 +787,93 @@ private fun resolveComprehensiveQualities(item: SniffedMediaItem): List<VideoQua
         formatTag = formatTag
     )
     return listOf(singleOption)
+}
+
+/**
+ * Deduplicate by URL and distinct quality tier, hide preview clips, and guarantee
+ * that identical resolutions with identical file sizes never render twice.
+ */
+private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): List<VideoQualityOption> {
+    if (list.isEmpty()) return emptyList()
+
+    // 1. Strict deduplication by clean URL
+    val urlDeduplicated = list
+        .groupBy { it.url.substringBefore('?').substringBefore('#') }
+        .mapNotNull { (_, options) ->
+            options.maxWithOrNull(
+                compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
+                    .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                    .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+            )
+        }
+
+    // 2. Separate audio and video
+    val audioOptions = urlDeduplicated.filter {
+        it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
+    }
+    val videoOptions = urlDeduplicated.filterNot {
+        it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
+    }
+
+    // 3. Suppress vague "Direct Stream" if named video options exist
+    val hasNamedVideo = videoOptions.any {
+        it.resolution.isNotBlank() && !it.label.contains("Direct Stream", ignoreCase = true)
+    }
+    val cleanVideos = if (hasNamedVideo) {
+        videoOptions.filterNot { it.label.contains("Direct Stream", ignoreCase = true) || it.resolution.isBlank() }
+    } else {
+        videoOptions
+    }
+
+    // 4. Group by clean resolution tier and deduplicate
+    val distinctTiers = cleanVideos
+        .groupBy { opt ->
+            val badge = opt.cleanResolutionBadge
+            if (badge.isNotBlank()) badge else opt.resolution.ifBlank { opt.label }
+        }
+        .mapNotNull { (_, opts) ->
+            opts.maxWithOrNull(
+                compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
+                    .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                    .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+            )
+        }
+
+    // 5. Never allow identical resolutions with the same file size to render twice
+    val uniqueVideos = mutableListOf<VideoQualityOption>()
+    val seenResolutions = mutableSetOf<String>()
+    val seenSizes = mutableSetOf<Long>()
+
+    val sortedVideos = distinctTiers.sortedWith(
+        compareByDescending<VideoQualityOption> { it.cleanResolutionBadge }
+            .thenByDescending { it.bandwidthBps }
+            .thenByDescending { it.estimatedSizeBytes }
+    )
+
+    for (opt in sortedVideos) {
+        val resKey = opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
+        if (resKey.isNotBlank() && seenResolutions.contains(resKey)) continue
+        if (opt.estimatedSizeBytes > 0L && seenSizes.contains(opt.estimatedSizeBytes)) continue
+
+        if (resKey.isNotBlank()) {
+            seenResolutions.add(resKey)
+        }
+        if (opt.estimatedSizeBytes > 0L) {
+            seenSizes.add(opt.estimatedSizeBytes)
+        }
+        uniqueVideos.add(opt)
+    }
+
+    val trimmedVideos = if (uniqueVideos.size > 4) uniqueVideos.take(4) else uniqueVideos
+    val bestAudio = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
+
+    val combined = if (bestAudio != null && trimmedVideos.size >= 4) {
+        trimmedVideos.take(3) + bestAudio
+    } else if (bestAudio != null) {
+        trimmedVideos + bestAudio
+    } else {
+        trimmedVideos
+    }
+
+    return combined.ifEmpty { list.take(1) }
 }

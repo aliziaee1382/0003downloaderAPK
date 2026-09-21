@@ -153,4 +153,174 @@ class Phase2SnifferTest {
         assertEquals("250p", single.cleanResolutionBadge)
         assertEquals(baseUrl, single.url)
     }
+
+    @Test
+    fun testNormalizeAndBucketQualitiesAggressiveDeduplication() {
+        val engine = ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine {}
+
+        val raw = listOf(
+            VideoQualityOption(
+                label = "1080p",
+                resolution = "1920x1080",
+                bandwidthBps = 4000000L,
+                url = "https://cdn.example.com/video_1080.mp4?token=abc&session=1",
+                isHlsVariant = false,
+                estimatedSizeBytes = 50 * 1024 * 1024L,
+                formatTag = "MP4"
+            ),
+            // Duplicate URL with different query parameters
+            VideoQualityOption(
+                label = "1080p",
+                resolution = "1920x1080",
+                bandwidthBps = 4000000L,
+                url = "https://cdn.example.com/video_1080.mp4?token=xyz",
+                isHlsVariant = false,
+                estimatedSizeBytes = 50 * 1024 * 1024L,
+                formatTag = "MP4"
+            ),
+            // Duplicate resolution and identical size
+            VideoQualityOption(
+                label = "1080p FHD",
+                resolution = "1920x1080",
+                bandwidthBps = 4000000L,
+                url = "https://cdn.example.com/video_1080_alt.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 50 * 1024 * 1024L,
+                formatTag = "MP4"
+            ),
+            VideoQualityOption(
+                label = "720p",
+                resolution = "1280x720",
+                bandwidthBps = 2000000L,
+                url = "https://cdn.example.com/video_720.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 25 * 1024 * 1024L,
+                formatTag = "MP4"
+            ),
+            VideoQualityOption(
+                label = "Audio Only",
+                resolution = "Audio",
+                bandwidthBps = 128000L,
+                url = "https://cdn.example.com/audio.m4a",
+                isHlsVariant = false,
+                estimatedSizeBytes = 4 * 1024 * 1024L,
+                formatTag = "AUDIO"
+            )
+        )
+
+        val bucketed = engine.normalizeAndBucketQualities(
+            rawQualities = raw,
+            durationSeconds = 120.0,
+            baseFileSizeBytes = 50 * 1024 * 1024L,
+            isHls = false,
+            fallbackUrl = "https://cdn.example.com/video_1080.mp4"
+        )
+
+        // Only one 1080p option must remain, followed by 720p, followed by Audio track at the bottom
+        assertEquals(3, bucketed.size)
+        assertTrue(bucketed[0].cleanResolutionBadge.contains("1080p"))
+        assertTrue(bucketed[1].cleanResolutionBadge.contains("720p"))
+        assertTrue(bucketed[2].cleanResolutionBadge.contains("Audio", ignoreCase = true))
+    }
+
+    @Test
+    fun testNormalizeAndBucketQualitiesFiltersMicroClipsAndPreviews() {
+        val engine = ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine {}
+
+        val raw = listOf(
+            // Full feature video (50 MB)
+            VideoQualityOption(
+                label = "720p",
+                resolution = "1280x720",
+                bandwidthBps = 2500000L,
+                url = "https://cdn.example.com/main_video.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 50 * 1024 * 1024L,
+                formatTag = "MP4"
+            ),
+            // Background preview MP4 under 1.5 MB
+            VideoQualityOption(
+                label = "preview",
+                resolution = "480x270",
+                bandwidthBps = 300000L,
+                url = "https://cdn.example.com/thumb_preview.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 800 * 1024L,
+                formatTag = "MP4"
+            ),
+            // Micro clip under 1.5 MB
+            VideoQualityOption(
+                label = "teaser",
+                resolution = "640x360",
+                bandwidthBps = 500000L,
+                url = "https://cdn.example.com/teaser_clip.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 1200 * 1024L,
+                formatTag = "MP4"
+            )
+        )
+
+        val bucketed = engine.normalizeAndBucketQualities(
+            rawQualities = raw,
+            durationSeconds = 180.0,
+            baseFileSizeBytes = 50 * 1024 * 1024L,
+            isHls = false,
+            fallbackUrl = "https://cdn.example.com/main_video.mp4"
+        )
+
+        // Micro-clips and previews must be completely discarded
+        assertEquals(1, bucketed.size)
+        assertEquals("https://cdn.example.com/main_video.mp4", bucketed[0].url)
+    }
+
+    @Test
+    fun testNormalizeAndBucketQualitiesPrioritizesProgressiveMp4OverVagueHlsDirectStream() {
+        val engine = ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine {}
+
+        val raw = listOf(
+            // Vague Direct Stream HLS sub-variant
+            VideoQualityOption(
+                label = "Direct Stream",
+                resolution = "",
+                bandwidthBps = 0L,
+                url = "https://cdn.example.com/hls/index.m3u8",
+                isHlsVariant = true,
+                estimatedSizeBytes = 0L,
+                formatTag = "HLS M3U8"
+            ),
+            // Clean progressive MP4 options discovered from player
+            VideoQualityOption(
+                label = "1080p FHD",
+                resolution = "1920x1080",
+                bandwidthBps = 5000000L,
+                url = "https://cdn.example.com/video_1080p.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 100 * 1024 * 1024L,
+                formatTag = "MP4"
+            ),
+            VideoQualityOption(
+                label = "720p HD",
+                resolution = "1280x720",
+                bandwidthBps = 2500000L,
+                url = "https://cdn.example.com/video_720p.mp4",
+                isHlsVariant = false,
+                estimatedSizeBytes = 50 * 1024 * 1024L,
+                formatTag = "MP4"
+            )
+        )
+
+        val bucketed = engine.normalizeAndBucketQualities(
+            rawQualities = raw,
+            durationSeconds = 160.0,
+            baseFileSizeBytes = 100 * 1024 * 1024L,
+            isHls = false,
+            fallbackUrl = "https://cdn.example.com/video_1080p.mp4"
+        )
+
+        // Vague HLS "Direct Stream" must be suppressed in favor of clean progressive MP4s
+        assertEquals(2, bucketed.size)
+        assertFalse(bucketed.any { it.label == "Direct Stream" })
+        assertTrue(bucketed[0].cleanResolutionBadge.contains("1080p"))
+        assertTrue(bucketed[1].cleanResolutionBadge.contains("720p"))
+    }
 }
