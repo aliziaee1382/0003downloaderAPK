@@ -188,15 +188,31 @@ object HlsManifestParser {
                     val streamUrl = resolveUrl(baseUrl, currentLine)
                     val bandwidth = extractBandwidth(lastStreamInf)
                     val (w, h) = extractResolutionDimensions(lastStreamInf)
-                    val resStr = if (w > 0 && h > 0) "${w}x${h}" else ""
+
+                    val (effectiveW, effectiveH) = if (w > 0 && h > 0) {
+                        w to h
+                    } else if (bandwidth > 0L) {
+                        when {
+                            bandwidth >= 12_000_000L -> 3840 to 2160
+                            bandwidth >= 7_000_000L -> 2560 to 1440
+                            bandwidth >= 3_500_000L -> 1920 to 1080
+                            bandwidth in 1_600_000L..3_499_999L -> 1280 to 720
+                            bandwidth in 750_000L..1_599_999L -> 854 to 480
+                            else -> 640 to 360
+                        }
+                    } else {
+                        0 to 0
+                    }
+
+                    val resStr = if (w > 0 && h > 0) "${w}x${h}" else if (effectiveH > 0) "${effectiveH}p" else ""
                     val label = formatQualityLabel(w, h, bandwidth)
 
                     rawVariants.add(
                         RawVariant(
                             url = streamUrl,
                             bandwidth = bandwidth,
-                            width = w,
-                            height = h,
+                            width = if (w > 0) w else effectiveW,
+                            height = if (h > 0) h else effectiveH,
                             resolution = resStr,
                             label = label
                         )
@@ -210,9 +226,8 @@ object HlsManifestParser {
             }
 
             // Retain genuine server-provided variants:
-            // 1. Filter out preview/teaser variants if standard variants exist
-            // 2. Hide unlabeled intermediate playlist chunks if named variants exist
-            // 3. Deduplicate variants sharing the same resolution or clean URL, keeping highest bandwidth
+            // 1. Group streams by distinct resolution height (e.g., 1080, 720, 480, 360) and keep highest bandwidth
+            // 2. Never filter out HLS variants based on megabytes. Keep all declared server variants.
             val hasNamedVariants = rawVariants.any { it.resolution.isNotEmpty() }
 
             val deduplicatedVariants = rawVariants
@@ -226,17 +241,15 @@ object HlsManifestParser {
                     hasNamedVariants && (variant.resolution.isEmpty() || variant.label.equals("Variant Stream", ignoreCase = true))
                 }
                 .groupBy { variant ->
-                    val cleanUrl = variant.url.substringBefore('?').substringBefore('#')
-                    if (variant.resolution.isNotEmpty()) variant.resolution else cleanUrl
+                    if (variant.height > 0) "${variant.height}p" else variant.url.substringBefore('?').substringBefore('#')
                 }
-                .mapNotNull { (_, variantsInGroup) ->
-                    variantsInGroup.maxByOrNull { it.bandwidth }
+                .mapNotNull { (_, variantsInTier) ->
+                    variantsInTier.maxByOrNull { it.bandwidth }
                 }
-                .distinctBy { variant ->
-                    val cleanUrl = variant.url.substringBefore('?').substringBefore('#')
-                    if (variant.resolution.isNotEmpty()) variant.resolution else cleanUrl
-                }
-                .sortedByDescending { it.bandwidth }
+                .sortedWith(
+                    compareByDescending<RawVariant> { it.height }
+                        .thenByDescending { it.bandwidth }
+                )
 
             // Read actual #EXTINF segment durations from the media playlist of the first variant
             var actualDuration = 0.0
@@ -272,7 +285,10 @@ object HlsManifestParser {
                 )
             }
 
-            val sortedResults = results.sortedByDescending { it.bandwidthBps }
+            val sortedResults = results.sortedWith(
+                compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
+                    .thenByDescending { it.bandwidthBps }
+            )
             return HlsParseResult(sortedResults, finalDuration)
         }
 
@@ -466,26 +482,30 @@ object HlsManifestParser {
         val maxDim = max(width, height)
         val minDim = min(width, height)
 
-        val quality = when {
-            maxDim >= 3840 || minDim >= 2160 -> "4K UHD"
-            maxDim >= 2560 || minDim >= 1440 -> "1440p 2K"
-            maxDim >= 1920 || minDim >= 1080 -> "1080p FHD"
-            maxDim >= 1280 || minDim >= 720 -> "720p HD"
-            maxDim >= 854 || minDim >= 480 -> "480p SD"
-            maxDim >= 640 || minDim >= 360 -> "360p"
-            minDim > 0 -> "${minDim}p"
-            bandwidth >= 12_000_000L -> "4K UHD"
-            bandwidth >= 7_000_000L -> "1440p 2K"
-            bandwidth >= 4_500_000L -> "1080p FHD"
-            bandwidth >= 2_200_000L -> "720p HD"
-            bandwidth >= 900_000L -> "480p SD"
-            bandwidth >= 400_000L -> "360p"
-            bandwidth > 0L -> "${bandwidth / 1000} kbps"
-            else -> "Variant Stream"
+        if (minDim > 0 || maxDim > 0) {
+            val quality = when {
+                maxDim >= 3840 || minDim >= 2160 -> "4K UHD"
+                maxDim >= 2560 || minDim >= 1440 -> "1440p 2K"
+                maxDim >= 1920 || minDim >= 1080 -> "1080p FHD"
+                maxDim >= 1280 || minDim >= 720 -> "720p HD"
+                maxDim >= 854 || minDim >= 480 -> "480p SD"
+                maxDim >= 640 || minDim >= 360 -> "360p SD"
+                minDim > 0 -> "${minDim}p"
+                else -> "${maxDim}p"
+            }
+            val resStr = if (width > 0 && height > 0) "${width}x${height}" else ""
+            return if (resStr.isNotEmpty()) "$quality ($resStr)" else quality
         }
 
-        val resStr = if (width > 0 && height > 0) "${width}x${height}" else ""
-        return if (resStr.isNotEmpty()) "$quality ($resStr)" else quality
+        return when {
+            bandwidth >= 12_000_000L -> "4K UHD"
+            bandwidth >= 7_000_000L -> "1440p 2K"
+            bandwidth >= 3_500_000L -> "1080p FHD"
+            bandwidth in 1_600_000L..3_499_999L -> "720p HD"
+            bandwidth in 750_000L..1_599_999L -> "480p SD"
+            bandwidth > 0L -> "360p SD"
+            else -> "Source Stream"
+        }
     }
 
     private fun buildHeaders(headersMap: Map<String, String>): Headers {

@@ -825,11 +825,11 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
         videoOptions
     }
 
-    // 4. Group by clean resolution tier and deduplicate
+    // 4. Group streams by distinct resolution height (e.g., 1080, 720, 480, 360) and keep highest bandwidth
     val distinctTiers = cleanVideos
         .groupBy { opt ->
-            val badge = opt.cleanResolutionBadge
-            if (badge.isNotBlank()) badge else opt.resolution.ifBlank { opt.label }
+            val h = opt.getResolutionHeight()
+            if (h > 0) "${h}p" else opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
         }
         .mapNotNull { (_, opts) ->
             opts.maxWithOrNull(
@@ -839,40 +839,38 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
             )
         }
 
-    // 5. Never allow identical resolutions with the same file size to render twice
-    val uniqueVideos = mutableListOf<VideoQualityOption>()
-    val seenResolutions = mutableSetOf<String>()
-    val seenSizes = mutableSetOf<Long>()
-
+    // 5. Present a clean, descending list from highest resolution to lowest resolution
     val sortedVideos = distinctTiers.sortedWith(
-        compareByDescending<VideoQualityOption> { it.cleanResolutionBadge }
+        compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
             .thenByDescending { it.bandwidthBps }
             .thenByDescending { it.estimatedSizeBytes }
     )
 
+    // 6. Never allow identical resolutions with the same file size to render twice
+    val uniqueVideos = mutableListOf<VideoQualityOption>()
+    val seenHeights = mutableSetOf<Int>()
+    val seenResolutions = mutableSetOf<String>()
+    val seenSizes = mutableSetOf<Long>()
+
     for (opt in sortedVideos) {
+        val h = opt.getResolutionHeight()
         val resKey = opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
+        if (h > 0 && seenHeights.contains(h)) continue
         if (resKey.isNotBlank() && seenResolutions.contains(resKey)) continue
         if (opt.estimatedSizeBytes > 0L && seenSizes.contains(opt.estimatedSizeBytes)) continue
 
-        if (resKey.isNotBlank()) {
-            seenResolutions.add(resKey)
-        }
-        if (opt.estimatedSizeBytes > 0L) {
-            seenSizes.add(opt.estimatedSizeBytes)
-        }
+        if (h > 0) seenHeights.add(h)
+        if (resKey.isNotBlank()) seenResolutions.add(resKey)
+        if (opt.estimatedSizeBytes > 0L) seenSizes.add(opt.estimatedSizeBytes)
         uniqueVideos.add(opt)
     }
 
-    val trimmedVideos = if (uniqueVideos.size > 4) uniqueVideos.take(4) else uniqueVideos
     val bestAudio = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
 
-    val combined = if (bestAudio != null && trimmedVideos.size >= 4) {
-        trimmedVideos.take(3) + bestAudio
-    } else if (bestAudio != null) {
-        trimmedVideos + bestAudio
+    val combined = if (bestAudio != null) {
+        uniqueVideos + bestAudio
     } else {
-        trimmedVideos
+        uniqueVideos
     }
 
     return combined.ifEmpty { list.take(1) }

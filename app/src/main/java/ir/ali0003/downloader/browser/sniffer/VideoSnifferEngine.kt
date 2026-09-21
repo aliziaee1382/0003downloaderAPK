@@ -580,55 +580,150 @@ class VideoSnifferEngine(
         qualityLabelHint: String? = null,
         resolutionHint: String? = null
     ): VideoQualityOption {
-        val lower = (mediaUrl + " " + (qualityLabelHint ?: "") + " " + (resolutionHint ?: "") + " " + pageTitle).lowercase()
+        val isAudio = formatTag.contains("AUDIO", ignoreCase = true) ||
+                mediaUrl.contains(".mp3", ignoreCase = true) ||
+                mediaUrl.contains(".m4a", ignoreCase = true)
 
-        val (resLabel, resDimensions) = when {
-            resolutionHint != null && resolutionHint.contains("x") -> {
-                val parts = resolutionHint.split("x")
-                val h = parts.getOrNull(1)?.toIntOrNull() ?: 0
-                val label = if (h > 0) "${h}p" else resolutionHint
-                label to resolutionHint
-            }
-            resolutionHint != null && resolutionHint.matches(Regex("""\d+p?""")) -> {
-                val clean = resolutionHint.removeSuffix("p")
-                "${clean}p" to ""
-            }
-            qualityLabelHint != null && qualityLabelHint.isNotBlank() -> {
-                qualityLabelHint to ""
-            }
-            lower.contains("4k") || lower.contains("2160") -> "4K UHD" to "3840x2160"
-            lower.contains("2k") || lower.contains("1440") -> "1440p 2K" to "2560x1440"
-            lower.contains("1080") -> "1080p FHD" to "1920x1080"
-            lower.contains("720") -> "720p HD" to "1280x720"
-            lower.contains("480") -> "480p SD" to "854x480"
-            lower.contains("360") -> "360p" to "640x360"
-            lower.contains("250") -> "250p" to ""
-            lower.contains("240") -> "240p" to "426x240"
-            else -> {
-                if (formatTag == "AUDIO") {
-                    "Audio Track" to "Audio Only"
-                } else {
-                    "Direct Video" to ""
+        if (isAudio) {
+            val audioBandwidth = if (durationSeconds > 0.0 && fileSizeBytes > 0L) {
+                (fileSizeBytes * 8L) / durationSeconds.toLong().coerceAtLeast(1L)
+            } else 128000L
+
+            return VideoQualityOption(
+                label = "Audio Track",
+                resolution = "Audio",
+                bandwidthBps = audioBandwidth,
+                url = mediaUrl,
+                isHlsVariant = false,
+                estimatedSizeBytes = fileSizeBytes,
+                formatTag = "AUDIO"
+            )
+        }
+
+        // 1. Check genuine quality hints from HTML5 tags (e.g. data-quality, label, res) or explicit hints
+        val explicitHint = resolutionHint?.trim()?.takeIf { it.isNotBlank() }
+            ?: qualityLabelHint?.trim()?.takeIf { it.isNotBlank() }
+
+        var parsedLabel = ""
+        var parsedRes = ""
+
+        if (explicitHint != null) {
+            val dimRegex = """(\d{3,4})x(\d{3,4})""".toRegex()
+            val dimMatch = dimRegex.find(explicitHint)
+            if (dimMatch != null) {
+                val w = dimMatch.groupValues[1].toIntOrNull() ?: 0
+                val h = dimMatch.groupValues[2].toIntOrNull() ?: 0
+                if (h > 0) {
+                    parsedRes = "${w}x${h}"
+                    parsedLabel = when {
+                        h >= 2160 -> "4K UHD"
+                        h >= 1440 -> "1440p 2K"
+                        h >= 1080 -> "1080p FHD"
+                        h >= 720 -> "720p HD"
+                        h >= 480 -> "480p SD"
+                        h >= 360 -> "360p SD"
+                        else -> "${h}p"
+                    }
+                }
+            } else {
+                val pRegex = """(\d{3,4})p?""".toRegex()
+                val pMatch = pRegex.find(explicitHint)
+                if (pMatch != null) {
+                    val h = pMatch.groupValues[1].toIntOrNull() ?: 0
+                    if (h > 0) {
+                        parsedRes = "${h}p"
+                        parsedLabel = when {
+                            h >= 2160 -> "4K UHD"
+                            h >= 1440 -> "1440p 2K"
+                            h >= 1080 -> "1080p FHD"
+                            h >= 720 -> "720p HD"
+                            h >= 480 -> "480p SD"
+                            h >= 360 -> "360p SD"
+                            else -> "${h}p"
+                        }
+                    }
                 }
             }
         }
 
-        val bandwidth = if (durationSeconds > 0.0 && fileSizeBytes > 0L) {
-            (fileSizeBytes * 8 / durationSeconds).toLong()
+        // Also check URL patterns if explicit hints were absent
+        if (parsedLabel.isEmpty()) {
+            val urlClean = mediaUrl.substringBefore('?').lowercase()
+            val urlDimMatch = """(\d{3,4})x(\d{3,4})""".toRegex().find(urlClean)
+            if (urlDimMatch != null) {
+                val w = urlDimMatch.groupValues[1].toIntOrNull() ?: 0
+                val h = urlDimMatch.groupValues[2].toIntOrNull() ?: 0
+                if (h > 0) {
+                    parsedRes = "${w}x${h}"
+                    parsedLabel = when {
+                        h >= 2160 -> "4K UHD"
+                        h >= 1440 -> "1440p 2K"
+                        h >= 1080 -> "1080p FHD"
+                        h >= 720 -> "720p HD"
+                        h >= 480 -> "480p SD"
+                        h >= 360 -> "360p SD"
+                        else -> "${h}p"
+                    }
+                }
+            } else {
+                val urlP = """(?:_|-|/|v|quality=)(\d{3,4})p?\b""".toRegex().find(urlClean)
+                if (urlP != null) {
+                    val h = urlP.groupValues[1].toIntOrNull() ?: 0
+                    if (h in listOf(240, 360, 480, 720, 1080, 1440, 2160)) {
+                        parsedRes = "${h}p"
+                        parsedLabel = when {
+                            h >= 2160 -> "4K UHD"
+                            h >= 1440 -> "1440p 2K"
+                            h >= 1080 -> "1080p FHD"
+                            h >= 720 -> "720p HD"
+                            h >= 480 -> "480p SD"
+                            h >= 360 -> "360p SD"
+                            else -> "${h}p"
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Bitrate-Derived Classification:
+        // Compute actual bitrate using: (contentLengthBytes * 8L) / durationSeconds.toLong()
+        val durationSec = durationSeconds.toLong()
+        val bitrateBps = if (durationSec > 0L && fileSizeBytes > 0L) {
+            (fileSizeBytes * 8L) / durationSec
         } else {
             0L
         }
 
-        val displayLabel = if (resDimensions.isNotBlank() && !resLabel.contains(resDimensions)) {
-            "$resLabel ($resDimensions)"
+        // Map bitrateBps to standard resolution tiers matching the bandwidth scale:
+        if (parsedLabel.isEmpty()) {
+            if (bitrateBps > 0L) {
+                val (tierLabel, resDim) = when {
+                    bitrateBps >= 12_000_000L -> "4K UHD" to "3840x2160"
+                    bitrateBps >= 7_000_000L -> "1440p 2K" to "2560x1440"
+                    bitrateBps >= 3_500_000L -> "1080p FHD" to "1920x1080"
+                    bitrateBps >= 1_600_000L -> "720p HD" to "1280x720"
+                    bitrateBps >= 750_000L -> "480p SD" to "854x480"
+                    else -> "360p SD" to "640x360"
+                }
+                parsedLabel = tierLabel
+                parsedRes = resDim
+            } else {
+                // If duration is unavailable: display as "Source Stream" with exact probed Content-Length
+                parsedLabel = "Source Stream"
+                parsedRes = ""
+            }
+        }
+
+        val displayLabel = if (parsedRes.isNotBlank() && !parsedLabel.contains(parsedRes) && parsedRes.contains("x")) {
+            "$parsedLabel ($parsedRes)"
         } else {
-            resLabel
+            parsedLabel
         }
 
         return VideoQualityOption(
             label = displayLabel,
-            resolution = if (resDimensions.isNotBlank()) resDimensions else resLabel,
-            bandwidthBps = bandwidth,
+            resolution = if (parsedRes.isNotBlank()) parsedRes else parsedLabel,
+            bandwidthBps = bitrateBps,
             url = mediaUrl,
             isHlsVariant = false,
             estimatedSizeBytes = fileSizeBytes,
@@ -646,7 +741,7 @@ class VideoSnifferEngine(
         if (rawQualities.isEmpty()) {
             return listOf(
                 VideoQualityOption(
-                    label = if (isHls) "Direct Stream" else "Direct Video",
+                    label = if (isHls) "Direct Stream" else "Source Stream",
                     resolution = "",
                     bandwidthBps = 0L,
                     url = fallbackUrl,
@@ -657,11 +752,10 @@ class VideoSnifferEngine(
             )
         }
 
-        // 1. Aggressive Deduplication by clean URL (eliminate duplicate query/hash variations)
+        // 1. Strict Deduplication by clean URL
         val urlDeduplicated = rawQualities
             .groupBy { it.url.substringBefore('?').substringBefore('#') }
             .mapNotNull { (_, optionsForUrl) ->
-                // Keep option with highest verified size, bandwidth, or progressive MP4 preference
                 optionsForUrl.maxWithOrNull(
                     compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
                         .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
@@ -669,23 +763,26 @@ class VideoSnifferEngine(
                 )
             }
 
-        // 2. Filter Out Micro-Clips & Thumbnail Previews
+        // 2. Filter Out Micro-Clips & Thumbnail Previews (Never filter out HLS variants based on megabytes)
         val hasFullVideo = urlDeduplicated.any { opt ->
             val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
-            !isAudio && (opt.estimatedSizeBytes >= 1536 * 1024L || (durationSeconds >= 10.0 && opt.estimatedSizeBytes > 0L)) && !isThumbnailOrPreviewUrl(opt.url)
+            !isAudio && (opt.isHlsVariant || opt.estimatedSizeBytes >= 1536 * 1024L || (durationSeconds >= 10.0 && opt.estimatedSizeBytes > 0L)) && !isThumbnailOrPreviewUrl(opt.url)
         }
 
         val postClipFilter = if (hasFullVideo) {
             urlDeduplicated.filterNot { opt ->
                 val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
                 if (isAudio) return@filterNot false
+                // Keep all declared server HLS variants
+                if (opt.isHlsVariant) {
+                    return@filterNot isThumbnailOrPreviewUrl(opt.url) || isThumbnailOrPreviewUrl(opt.label)
+                }
                 val isPreview = isThumbnailOrPreviewUrl(opt.url) || isThumbnailOrPreviewUrl(opt.label)
                 val isUnderSize = opt.estimatedSizeBytes in 1 until (1536 * 1024L)
                 val isShort = durationSeconds in 0.001..9.999
                 isPreview || isUnderSize || isShort
             }
         } else {
-            // Standalone video or audio item: filter out background previews matching common patterns under 1 MB
             urlDeduplicated.filterNot { opt ->
                 val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
                 if (isAudio) return@filterNot false
@@ -694,7 +791,7 @@ class VideoSnifferEngine(
             }
         }
 
-        // 3. Preference for Clean Progressive MP4 over Raw HLS Sub-playlists
+        // 3. Clean stream list: suppress vague Direct Stream if named video options exist
         val progressiveMp4s = postClipFilter.filter {
             !it.isHlsVariant && !it.formatTag.contains("AUDIO", ignoreCase = true) &&
                     (it.resolution.isNotBlank() || !it.label.contains("Direct Stream", ignoreCase = true))
@@ -710,12 +807,10 @@ class VideoSnifferEngine(
             val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
             if (isAudio) return@filterNot false
 
-            // If progressive MP4 direct links exist, suppress redundant HLS sub-variants named vaguely as "Direct Stream"
             if (hasProgressiveMp4 && opt.isHlsVariant && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.resolution.isBlank())) {
                 return@filterNot true
             }
 
-            // If HLS is used or other named options exist, hide unlabeled intermediate playlist chunks
             if (hasNamedVideoOptions && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.resolution.isBlank() || opt.label.equals("Variant Stream", ignoreCase = true))) {
                 return@filterNot true
             }
@@ -723,7 +818,7 @@ class VideoSnifferEngine(
             false
         }
 
-        // 4. Strict Deduplication by Resolution Tier & File Size (Never allow identical resolutions with the same file size to render twice)
+        // 4. Separate Audio and Video
         val audioOptions = cleanStreamList.filter {
             it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
         }
@@ -731,41 +826,40 @@ class VideoSnifferEngine(
             it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
         }
 
+        // 5. Group streams by their distinct resolution height (e.g., 1080, 720, 480, 360)
+        // and keep the highest-bandwidth stream for each tier.
         val distinctVideoTiers = videoOptions
-            .groupBy { getResolutionTierKey(it) }
+            .groupBy { it.getResolutionHeight() }
             .mapNotNull { (_, optionsInTier) ->
                 optionsInTier.maxWithOrNull(
-                    // Prefer progressive MP4 over HLS
                     compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
-                        // Prefer option with probed file size
                         .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                        // Prefer higher bandwidth or size
                         .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
                 )
             }
 
-        // Filter out any option that duplicates an already-represented resolution OR file size
-        val uniqueVideoOptions = mutableListOf<VideoQualityOption>()
-        val seenResolutions = mutableSetOf<String>()
-        val seenExactSizes = mutableSetOf<Long>()
-
+        // 6. Present a clean, descending list from highest resolution to lowest resolution
         val sortedCandidates = distinctVideoTiers.sortedWith(
-            compareByDescending<VideoQualityOption> { extractHeightForSorting(it) }
+            compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
                 .thenByDescending { it.bandwidthBps }
                 .thenByDescending { it.estimatedSizeBytes }
         )
 
+        // Never allow identical resolutions with the same file size to render twice
+        val uniqueVideoOptions = mutableListOf<VideoQualityOption>()
+        val seenHeights = mutableSetOf<Int>()
+        val seenExactSizes = mutableSetOf<Long>()
+
         for (opt in sortedCandidates) {
-            val resKey = getResolutionTierKey(opt)
-            if (resKey.isNotBlank() && resKey != "VIDEO" && seenResolutions.contains(resKey)) {
+            val h = opt.getResolutionHeight()
+            if (h > 0 && seenHeights.contains(h)) {
                 continue
             }
             if (opt.estimatedSizeBytes > 0L && seenExactSizes.contains(opt.estimatedSizeBytes)) {
-                // Same file size already represented in sheet
                 continue
             }
-            if (resKey.isNotBlank() && resKey != "VIDEO") {
-                seenResolutions.add(resKey)
+            if (h > 0) {
+                seenHeights.add(h)
             }
             if (opt.estimatedSizeBytes > 0L) {
                 seenExactSizes.add(opt.estimatedSizeBytes)
@@ -773,17 +867,13 @@ class VideoSnifferEngine(
             uniqueVideoOptions.add(opt)
         }
 
-        // 5. UI Cleanliness: Present a concise, unique list of 2 to 4 distinct qualities
-        // Sort: Highest resolution at top, down to lowest resolution, followed by Audio track at the bottom
-        val finalVideoList = if (uniqueVideoOptions.size > 4) uniqueVideoOptions.take(4) else uniqueVideoOptions
+        // 7. Audio track at the bottom
         val bestAudioOption = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
 
-        val combinedResult = if (bestAudioOption != null && finalVideoList.size >= 4) {
-            finalVideoList.take(3) + bestAudioOption
-        } else if (bestAudioOption != null) {
-            finalVideoList + bestAudioOption
+        val combinedResult = if (bestAudioOption != null) {
+            uniqueVideoOptions + bestAudioOption
         } else {
-            finalVideoList
+            uniqueVideoOptions
         }
 
         return if (combinedResult.isNotEmpty()) {
@@ -791,7 +881,7 @@ class VideoSnifferEngine(
         } else {
             listOf(
                 VideoQualityOption(
-                    label = if (isHls) "Direct Stream" else "Direct Video",
+                    label = if (isHls) "Direct Stream" else "Source Stream",
                     resolution = "",
                     bandwidthBps = 0L,
                     url = fallbackUrl,
@@ -804,49 +894,12 @@ class VideoSnifferEngine(
     }
 
     private fun getResolutionTierKey(opt: VideoQualityOption): String {
-        val h = extractHeightForSorting(opt)
-        return when {
-            h >= 2160 -> "2160p"
-            h >= 1440 -> "1440p"
-            h >= 1080 -> "1080p"
-            h >= 720 -> "720p"
-            h >= 480 -> "480p"
-            h >= 360 -> "360p"
-            h >= 240 -> "${h}p"
-            opt.cleanResolutionBadge.isNotBlank() -> opt.cleanResolutionBadge
-            opt.resolution.isNotBlank() -> opt.resolution
-            else -> opt.label
-        }
+        val h = opt.getResolutionHeight()
+        return if (h > 0) "${h}p" else opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
     }
 
     private fun extractHeightForSorting(option: VideoQualityOption): Int {
-        if (option.formatTag.contains("AUDIO", ignoreCase = true) || option.resolution.contains("Audio", ignoreCase = true)) {
-            return -1
-        }
-        val lower = (option.resolution + " " + option.label).lowercase()
-        val dimRegex = """(\d{3,4})x(\d{3,4})""".toRegex()
-        val dimMatch = dimRegex.find(lower)
-        if (dimMatch != null) {
-            val h = dimMatch.groupValues[2].toIntOrNull() ?: 0
-            if (h > 0) return h
-        }
-        val pRegex = """(\d{3,4})p\b""".toRegex()
-        val pMatch = pRegex.find(lower)
-        if (pMatch != null) {
-            val h = pMatch.groupValues[1].toIntOrNull() ?: 0
-            if (h > 0) return h
-        }
-        return when {
-            lower.contains("4k") || lower.contains("2160") -> 2160
-            lower.contains("2k") || lower.contains("1440") -> 1440
-            lower.contains("1080") -> 1080
-            lower.contains("720") -> 720
-            lower.contains("480") -> 480
-            lower.contains("360") -> 360
-            lower.contains("250") -> 250
-            lower.contains("240") -> 240
-            else -> 0
-        }
+        return option.getResolutionHeight()
     }
 
     private fun extractHeadersForUrl(
@@ -859,32 +912,44 @@ class VideoSnifferEngine(
 
         // 1. Sync Cookies from CookieManager
         try {
-            val cookie = CookieManager.getInstance().getCookie(mediaUrl) ?: CookieManager.getInstance().getCookie(pageUrl)
+            val cookie = CookieManager.getInstance().getCookie(mediaUrl)
+                ?: (if (pageUrl.isNotBlank()) CookieManager.getInstance().getCookie(pageUrl) else null)
+                ?: (if (currentPageUrl.get().isNotBlank()) CookieManager.getInstance().getCookie(currentPageUrl.get()) else null)
             if (!cookie.isNullOrBlank()) {
                 headers["Cookie"] = cookie
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Ignore cookie manager exception
         }
 
         // 2. Referer and Origin headers to avoid 403 Forbidden on CDN/LMS hosts
-        if (pageUrl.isNotBlank()) {
-            headers["Referer"] = pageUrl
+        val effectivePageUrl = when {
+            pageUrl.isNotBlank() -> pageUrl
+            currentPageUrl.get().isNotBlank() -> currentPageUrl.get()
+            else -> ""
+        }
+        if (effectivePageUrl.isNotBlank()) {
+            headers["Referer"] = effectivePageUrl
             try {
-                val origin = android.net.Uri.parse(pageUrl)
+                val origin = android.net.Uri.parse(effectivePageUrl)
                 if (origin.scheme != null && origin.host != null) {
                     headers["Origin"] = "${origin.scheme}://${origin.host}"
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Ignore
             }
         }
 
         // 3. User-Agent
-        if (!userAgent.isNullOrBlank()) {
-            headers["User-Agent"] = userAgent
-        } else if (existingHeaders.containsKey("User-Agent") || existingHeaders.containsKey("user-agent")) {
-            headers["User-Agent"] = existingHeaders["User-Agent"] ?: existingHeaders["user-agent"] ?: ""
+        val effectiveUa = when {
+            !userAgent.isNullOrBlank() -> userAgent
+            !currentUserAgent.get().isNullOrBlank() -> currentUserAgent.get()
+            existingHeaders.containsKey("User-Agent") -> existingHeaders["User-Agent"] ?: ""
+            existingHeaders.containsKey("user-agent") -> existingHeaders["user-agent"] ?: ""
+            else -> "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+        }
+        if (effectiveUa.isNotBlank()) {
+            headers["User-Agent"] = effectiveUa
         }
 
         // 4. Merge other existing headers

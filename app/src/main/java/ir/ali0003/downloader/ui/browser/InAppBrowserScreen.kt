@@ -31,6 +31,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -111,6 +112,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import ir.ali0003.downloader.R
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -763,27 +767,29 @@ fun BrowserHomePortalView(
                         .size(40.dp)
                         .clip(CircleShape)
                         .background(GlassTheme.colors.accentGlow.copy(alpha = 0.2f))
-                        .border(1.2.dp, GlassTheme.colors.accentGlow, CircleShape),
+                        .border(1.2.dp, GlassTheme.colors.accentGlow.copy(alpha = 0.6f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.SmartDisplay,
-                        contentDescription = null,
-                        tint = GlassTheme.colors.accentGlow,
-                        modifier = Modifier.size(22.dp)
+                    Image(
+                        painter = painterResource(id = R.drawable.img_app_logo),
+                        contentDescription = "0003 Downloader Logo",
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop
                     )
                 }
 
                 Column {
                     Text(
-                        text = "Downloader",
+                        text = "0003 Downloader",
                         color = GlassTheme.colors.textPrimary,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Black,
                         letterSpacing = 0.5.sp
                     )
                     Text(
-                        text = "High-Speed Video Sniffer",
+                        text = "High-Speed Video Sniffer & Vault",
                         color = GlassTheme.colors.textSecondary,
                         fontSize = 11.sp
                     )
