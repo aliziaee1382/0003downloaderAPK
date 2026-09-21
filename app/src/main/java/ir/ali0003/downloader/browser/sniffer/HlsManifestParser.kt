@@ -50,11 +50,106 @@ object HlsManifestParser {
                     return HlsParseResult(emptyList(), fallbackDurationSeconds)
                 }
                 val body = response.body?.string() ?: return HlsParseResult(emptyList(), fallbackDurationSeconds)
+
+                // If body is a Media Playlist (#EXTINF directly, no #EXT-X-STREAM-INF), probe candidate parent master playlists
+                if (body.contains("#EXTM3U") && !body.contains("#EXT-X-STREAM-INF:") && body.contains("#EXTINF:")) {
+                    val probedMaster = probeParentMasterPlaylist(masterUrl, headersMap, fallbackDurationSeconds)
+                    if (probedMaster != null && probedMaster.qualities.isNotEmpty()) {
+                        return probedMaster
+                    }
+                }
+
                 parseManifestContentWithDuration(body, masterUrl, headersMap, fallbackDurationSeconds)
             }
         } catch (e: Exception) {
             HlsParseResult(emptyList(), fallbackDurationSeconds)
         }
+    }
+
+    /**
+     * Probes candidate parent master playlists (e.g. master.m3u8, index.m3u8, playlist.m3u8)
+     * when a sub-variant media playlist was intercepted.
+     */
+    private fun probeParentMasterPlaylist(
+        subVariantUrl: String,
+        headersMap: Map<String, String>,
+        fallbackDurationSeconds: Double
+    ): HlsParseResult? {
+        val candidates = generateCandidateMasterUrls(subVariantUrl)
+        val headers = buildHeaders(headersMap)
+
+        for (candidateUrl in candidates) {
+            try {
+                val request = Request.Builder()
+                    .url(candidateUrl)
+                    .headers(headers)
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        val body = response.body?.string()
+                        if (body != null && body.contains("#EXTM3U") && body.contains("#EXT-X-STREAM-INF:")) {
+                            val parsed = parseManifestContentWithDuration(body, candidateUrl, headersMap, fallbackDurationSeconds)
+                            if (parsed.qualities.isNotEmpty()) {
+                                return parsed
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Continue checking other candidates
+            }
+        }
+        return null
+    }
+
+    private fun generateCandidateMasterUrls(variantUrl: String): List<String> {
+        val candidates = mutableListOf<String>()
+        try {
+            val uri = Uri.parse(variantUrl)
+            val path = uri.path ?: return emptyList()
+            val lastSlash = path.lastIndexOf('/')
+            val parentPath = if (lastSlash != -1) path.substring(0, lastSlash) else ""
+            val grandParentPath = if (parentPath.lastIndexOf('/') != -1) parentPath.substring(0, parentPath.lastIndexOf('/')) else ""
+
+            val schemeAndHost = "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}"
+            val queryStr = if (!uri.query.isNullOrBlank()) "?${uri.query}" else ""
+
+            val standardMasterFilenames = listOf("master.m3u8", "index.m3u8", "playlist.m3u8")
+
+            // In parent directory
+            for (name in standardMasterFilenames) {
+                val candidate = "$schemeAndHost$parentPath/$name$queryStr"
+                if (candidate != variantUrl && !candidates.contains(candidate)) {
+                    candidates.add(candidate)
+                }
+            }
+
+            // In grand-parent directory if nested (e.g. /hls/720p/index.m3u8 -> /hls/master.m3u8)
+            if (grandParentPath.isNotEmpty()) {
+                for (name in standardMasterFilenames) {
+                    val candidate = "$schemeAndHost$grandParentPath/$name$queryStr"
+                    if (candidate != variantUrl && !candidates.contains(candidate)) {
+                        candidates.add(candidate)
+                    }
+                }
+            }
+
+            // Regex replacements for subvariant patterns:
+            // e.g. hls_250p.m3u8 -> master.m3u8 or index.m3u8
+            // 720p.m3u8 -> master.m3u8
+            // video_360.m3u8 -> master.m3u8
+            val fileName = path.substringAfterLast('/')
+            if (fileName.contains(Regex("""(hls_)?\d+p?""", RegexOption.IGNORE_CASE))) {
+                for (name in standardMasterFilenames) {
+                    val replaced = variantUrl.replace(fileName, name)
+                    if (replaced != variantUrl && !candidates.contains(replaced)) {
+                        candidates.add(replaced)
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return candidates
     }
 
     fun fetchAndParseMasterPlaylist(
