@@ -4,10 +4,12 @@ workflows:
     max_build_duration: 30
     instance_type: mac_mini_m2
     scripts:
-      - name: Generate Keystore (First Build) & Compile Release APK
+      - name: Generate Keystore & Compile Release APK
         script: |
           touch .env.example
           touch .env
+
+          # 1. تولید کی‌استور در صورت عدم وجود
           if [ ! -f "$CM_BUILD_DIR/my-upload-key.jks" ]; then
             keytool -genkeypair -v \
               -keystore "$CM_BUILD_DIR/my-upload-key.jks" \
@@ -20,10 +22,15 @@ workflows:
               -validity 10000 \
               -dname "CN=Ali Ziaee, OU=0003, O=0003 Downloader, L=Tehran, ST=Tehran, C=IR"
           fi
-          curl -sL https://services.gradle.org/distributions/gradle-9.3.1-bin.zip -o gradle-9.3.1-bin.zip
-          unzip -q gradle-9.3.1-bin.zip
-          export PATH=$(pwd)/gradle-9.3.1/bin:$PATH
-          gradle assembleRelease --no-daemon
+
+          # 2. اعطای دسترسی اجرایی به Gradle Wrapper پروژه
+          chmod +x gradlew
+
+          # 3. اطمینان از تنظیم Gradle 9.3.1 داخل wrapper
+          sed -i '' 's/gradle-.*-bin.zip/gradle-9.3.1-bin.zip/g' gradle/wrapper/gradle-wrapper.properties || true
+
+          # 4. اجرای بیلد مستقیم با gradlew بدون دانلود دستی و خراب زیپ
+          ./gradlew assembleRelease --no-daemon --stacktrace
     artifacts:
-      - "**/build/outputs/apk/release/*.apk"
-      - "my-upload-key.jks"
+      - "app/build/outputs/apk/release/*.apk"
+      - "$CM_BUILD_DIR/my-upload-key.jks"
