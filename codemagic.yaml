@@ -23,14 +23,17 @@ workflows:
               -dname "CN=Ali Ziaee, OU=0003, O=0003 Downloader, L=Tehran, ST=Tehran, C=IR"
           fi
 
-          # 2. اعطای دسترسی اجرایی به Gradle Wrapper پروژه
-          chmod +x gradlew
+          # 2. دانلود مطمئن و نصب Gradle 9.3.1
+          echo "Downloading Gradle 9.3.1..."
+          curl -fL --retry 3 --retry-delay 2 "https://services.gradle.org/distributions/gradle-9.3.1-bin.zip" -o /tmp/gradle-9.3.1-bin.zip
+          unzip -q -o /tmp/gradle-9.3.1-bin.zip -d /tmp
+          export PATH=/tmp/gradle-9.3.1/bin:$PATH
 
-          # 3. اطمینان از تنظیم Gradle 9.3.1 داخل wrapper
-          sed -i '' 's/gradle-.*-bin.zip/gradle-9.3.1-bin.zip/g' gradle/wrapper/gradle-wrapper.properties || true
+          # بررسی نسخه گریدل نصب‌شده
+          gradle -v
 
-          # 4. اجرای بیلد مستقیم با gradlew بدون دانلود دستی و خراب زیپ
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          # 3. اجرای بیلد
+          gradle assembleRelease --no-daemon --stacktrace
     artifacts:
       - "app/build/outputs/apk/release/*.apk"
       - "$CM_BUILD_DIR/my-upload-key.jks"
