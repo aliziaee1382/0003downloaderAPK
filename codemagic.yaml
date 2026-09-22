@@ -9,7 +9,10 @@ workflows:
           touch .env.example
           touch .env
 
-          # 1. تولید کی‌استور در صورت عدم وجود
+          # 1. رفع تداخل ریسورس‌های آیکون (حذف وب‌پی‌های قدیمی)
+          find app/src/main/res/mipmap-* -name "ic_launcher*.webp" -delete || true
+
+          # 2. تولید کی‌استور در صورت عدم وجود
           if [ ! -f "$CM_BUILD_DIR/my-upload-key.jks" ]; then
             keytool -genkeypair -v \
               -keystore "$CM_BUILD_DIR/my-upload-key.jks" \
@@ -23,16 +26,12 @@ workflows:
               -dname "CN=Ali Ziaee, OU=0003, O=0003 Downloader, L=Tehran, ST=Tehran, C=IR"
           fi
 
-          # 2. دانلود مطمئن و نصب Gradle 9.3.1
-          echo "Downloading Gradle 9.3.1..."
+          # 3. دانلود و آماده‌سازی Gradle 9.3.1
           curl -fL --retry 3 --retry-delay 2 "https://services.gradle.org/distributions/gradle-9.3.1-bin.zip" -o /tmp/gradle-9.3.1-bin.zip
           unzip -q -o /tmp/gradle-9.3.1-bin.zip -d /tmp
           export PATH=/tmp/gradle-9.3.1/bin:$PATH
 
-          # بررسی نسخه گریدل نصب‌شده
-          gradle -v
-
-          # 3. اجرای بیلد
+          # 4. اجرای بیلد نهایی
           gradle assembleRelease --no-daemon --stacktrace
     artifacts:
       - "app/build/outputs/apk/release/*.apk"
