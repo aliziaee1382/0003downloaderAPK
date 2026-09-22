@@ -845,12 +845,15 @@ class VideoSnifferEngine(
                 .thenByDescending { it.estimatedSizeBytes }
         )
 
+        // Enforce strict size & bandwidth consistency across descending resolutions
+        val coherentCandidates = HlsManifestParser.enforceSizeCoherence(sortedCandidates)
+
         // Never allow identical resolutions with the same file size to render twice
         val uniqueVideoOptions = mutableListOf<VideoQualityOption>()
         val seenHeights = mutableSetOf<Int>()
         val seenExactSizes = mutableSetOf<Long>()
 
-        for (opt in sortedCandidates) {
+        for (opt in coherentCandidates) {
             val h = opt.getResolutionHeight()
             if (h > 0 && seenHeights.contains(h)) {
                 continue

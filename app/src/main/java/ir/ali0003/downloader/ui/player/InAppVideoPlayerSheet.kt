@@ -671,15 +671,16 @@ fun InAppVideoPlayerSheet(
                     }
 
                     // BOTTOM CONTROLS: Floating Glass Bar with Modern Scrubbing Track
+                    // Elevated with explicit safe insets so it never clips into system navigation gesture bars
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .align(Alignment.BottomCenter)
                             .navigationBarsPadding()
-                            .padding(horizontal = 16.dp, vertical = 14.dp)
+                            .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 28.dp)
                             .clip(RoundedCornerShape(20.dp))
-                            .background(Color(0xFF0D1420).copy(alpha = 0.85f))
-                            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(20.dp))
+                            .background(Color(0xFF0D1420).copy(alpha = 0.88f))
+                            .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(20.dp))
                             .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
                         Column(

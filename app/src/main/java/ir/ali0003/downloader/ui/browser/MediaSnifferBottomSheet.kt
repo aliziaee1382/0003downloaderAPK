@@ -846,13 +846,15 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
             .thenByDescending { it.estimatedSizeBytes }
     )
 
+    val coherentVideos = ir.ali0003.downloader.browser.sniffer.HlsManifestParser.enforceSizeCoherence(sortedVideos)
+
     // 6. Never allow identical resolutions with the same file size to render twice
     val uniqueVideos = mutableListOf<VideoQualityOption>()
     val seenHeights = mutableSetOf<Int>()
     val seenResolutions = mutableSetOf<String>()
     val seenSizes = mutableSetOf<Long>()
 
-    for (opt in sortedVideos) {
+    for (opt in coherentVideos) {
         val h = opt.getResolutionHeight()
         val resKey = opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
         if (h > 0 && seenHeights.contains(h)) continue

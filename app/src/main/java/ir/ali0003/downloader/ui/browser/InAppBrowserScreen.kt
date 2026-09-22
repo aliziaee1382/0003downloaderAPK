@@ -207,35 +207,8 @@ fun InAppBrowserScreen(
     var lastClipboardCheckTimestamp by remember { mutableStateOf(0L) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Observe clipboard on app resume with rate-limit protection against audit log spam
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                val now = System.currentTimeMillis()
-                if (now - lastClipboardCheckTimestamp > 1500L) {
-                    lastClipboardCheckTimestamp = now
-                    try {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        if (clipboard?.hasPrimaryClip() == true) {
-                            val clip = clipboard.primaryClip
-                            if (clip != null && clip.itemCount > 0) {
-                                val text = clip.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
-                                if (!text.isNullOrBlank() && (text.startsWith("http://") || text.startsWith("https://"))) {
-                                    if (text != lastHandledClipboardUrl && text != currentUrl) {
-                                        detectedClipboardUrl = text
-                                    }
-                                }
-                            }
-                        }
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
+    // Automatic background clipboard sniffing popup is completely disabled to prevent annoyance.
+    // Users can paste URLs manually whenever they want via the search bar paste icon or the paste card.
 
     // Intercept Back Press: Collapse search -> WebView goBack -> Return to Home
     BackHandler(enabled = isEditingUrl || !isBrowserHome) {
@@ -670,9 +643,9 @@ fun InAppBrowserScreen(
             }
         }
 
-        // Floating Clipboard URL Sniffer Card
+        // Floating Clipboard URL Sniffer Card (Disabled)
         AnimatedVisibility(
-            visible = detectedClipboardUrl != null,
+            visible = false,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 80.dp, start = 16.dp, end = 16.dp),

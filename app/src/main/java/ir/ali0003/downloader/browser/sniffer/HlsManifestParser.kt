@@ -289,7 +289,8 @@ object HlsManifestParser {
                 compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
                     .thenByDescending { it.bandwidthBps }
             )
-            return HlsParseResult(sortedResults, finalDuration)
+            val coherentResults = enforceSizeCoherence(sortedResults)
+            return HlsParseResult(coherentResults, finalDuration)
         }
 
         // Case B: Direct Media Playlist with #EXTINF segments directly
@@ -465,7 +466,12 @@ object HlsManifestParser {
     }
 
     private fun extractBandwidth(streamInf: String): Long {
-        val regex = "BANDWIDTH=(\\d+)".toRegex()
+        val avgRegex = """AVERAGE-BANDWIDTH=(\d+)""".toRegex()
+        val avgMatch = avgRegex.find(streamInf)
+        val avgBw = avgMatch?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        if (avgBw > 0L) return avgBw
+
+        val regex = """BANDWIDTH=(\d+)""".toRegex()
         val match = regex.find(streamInf)
         return match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
     }
@@ -537,5 +543,59 @@ object HlsManifestParser {
         } catch (e: Exception) {
             relativeOrAbsolute
         }
+    }
+
+    /**
+     * Ensures strict size & bandwidth consistency across descending resolutions.
+     * Prevents misleading edge cases where a lower resolution (e.g., 720p) is reported
+     * with a larger size or bandwidth than a higher resolution (e.g., 1080p).
+     */
+    fun enforceSizeCoherence(options: List<VideoQualityOption>): List<VideoQualityOption> {
+        if (options.size <= 1) return options
+
+        val result = options.toMutableList()
+        var changed = true
+        var passes = 0
+
+        while (changed && passes < 3) {
+            changed = false
+            passes++
+            for (i in 0 until result.size - 1) {
+                val curr = result[i]
+                val next = result[i + 1]
+
+                val currH = curr.getResolutionHeight()
+                val nextH = next.getResolutionHeight()
+
+                // Both must be valid video tiers
+                if (currH > nextH && currH > 0 && nextH > 0) {
+                    val currSize = curr.estimatedSizeBytes
+                    val nextSize = next.estimatedSizeBytes
+
+                    if (nextSize > 0L && currSize > 0L && currSize < nextSize) {
+                        // Inversion detected: Higher resolution has smaller size than lower resolution
+                        val scale = Math.pow(currH.toDouble() / nextH.toDouble(), 1.25)
+                        val adjustedSize = (nextSize * scale).toLong()
+                        val adjustedBandwidth = if (next.bandwidthBps > 0L) {
+                            (next.bandwidthBps * scale).toLong().coerceAtLeast(curr.bandwidthBps)
+                        } else {
+                            curr.bandwidthBps
+                        }
+                        result[i] = curr.copy(
+                            estimatedSizeBytes = adjustedSize,
+                            bandwidthBps = adjustedBandwidth
+                        )
+                        changed = true
+                    } else if (currSize > 0L && nextSize > 0L && nextSize > currSize) {
+                        result[i + 1] = next.copy(
+                            estimatedSizeBytes = (currSize * 0.7).toLong()
+                        )
+                        changed = true
+                    }
+                }
+            }
+        }
+
+        return result
     }
 }
