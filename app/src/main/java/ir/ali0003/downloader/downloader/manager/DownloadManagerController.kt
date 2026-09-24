@@ -123,7 +123,7 @@ class DownloadManagerController(
 
                     // Forward notification progress to foreground service
                     val percent = (progress.progress * 100).toInt()
-                    val speedText = if (progress.speedBps > 0) "${task.formattedSpeed}" else ""
+                    val speedText = if (progress.speedBps > 0) "${DownloadTaskEntity.formatFileSize(progress.speedBps)}/s" else ""
                     val etaText = progress.formattedEta
                     DownloadForegroundService.updateProgress(
                         context = context,
@@ -135,6 +135,17 @@ class DownloadManagerController(
                     )
 
                     if (progress.isCompleted) {
+                        if (!task.isHidden && outputFile.exists()) {
+                            try {
+                                android.media.MediaScannerConnection.scanFile(
+                                    context,
+                                    arrayOf(outputFile.absolutePath),
+                                    arrayOf("video/mp4")
+                                ) { path, uri ->
+                                    Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
+                                }
+                            } catch (_: Exception) {}
+                        }
                         downloadDao.markCompleted(task.id, System.currentTimeMillis())
                         activeJobs.remove(task.id)
                     } else if (progress.isFailed) {

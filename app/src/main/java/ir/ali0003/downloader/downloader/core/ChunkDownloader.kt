@@ -1,6 +1,7 @@
 package ir.ali0003.downloader.downloader.core
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.util.Log
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.data.settings.DownloadSettingsPreferences
@@ -118,7 +119,8 @@ class ChunkDownloader(
         var lastTime = System.currentTimeMillis()
         var lastBytes = 0L
 
-        val settings = DownloadSettingsPreferences.getInstance(context)
+        try {
+            val settings = DownloadSettingsPreferences.getInstance(context)
         val numThreads = settings.getEffectiveThreadCount().coerceIn(1, 16)
 
         if (supportsRange && contentLength > 0 && numThreads > 1) {
@@ -184,6 +186,18 @@ class ChunkDownloader(
                 Log.d(TAG, "Stitching ${chunkFiles.size} chunks into ${outputFile.name}")
                 stitchChunks(chunkFiles, outputFile)
 
+                if (!task.isHidden && outputFile.exists()) {
+                    try {
+                        MediaScannerConnection.scanFile(
+                            context,
+                            arrayOf(outputFile.absolutePath),
+                            arrayOf(task.mimeType.ifBlank { "video/mp4" })
+                        ) { path, uri ->
+                            Log.d(TAG, "MediaScanner indexed chunk downloaded file: $path -> $uri")
+                        }
+                    } catch (_: Exception) {}
+                }
+
                 // Emit 100% completion
                 emit(
                     DownloadProgress(
@@ -192,7 +206,8 @@ class ChunkDownloader(
                         totalBytes = contentLength,
                         speedBps = 0L,
                         etaSeconds = 0L,
-                        isCompleted = true
+                        isCompleted = true,
+                        explicitProgress = 1.0f
                     )
                 )
 
@@ -209,11 +224,37 @@ class ChunkDownloader(
                 outputFile = outputFile,
                 totalBytesEstimated = if (contentLength > 0) contentLength else task.totalBytes,
                 onProgress = { progress ->
+                    if (progress.isCompleted && !task.isHidden && outputFile.exists()) {
+                        try {
+                            MediaScannerConnection.scanFile(
+                                context,
+                                arrayOf(outputFile.absolutePath),
+                                arrayOf(task.mimeType.ifBlank { "video/mp4" })
+                            ) { path, uri ->
+                                Log.d(TAG, "MediaScanner indexed single stream downloaded file: $path -> $uri")
+                            }
+                        } catch (_: Exception) {}
+                    }
                     emit(progress.copy(taskId = taskId))
                 }
             )
         }
-    }.flowOn(Dispatchers.IO)
+    } catch (e: Exception) {
+        if (e is CancellationException) throw e
+        Log.e(TAG, "Task $taskId failed in ChunkDownloader: ${e.message}", e)
+        emit(
+            DownloadProgress(
+                taskId = taskId,
+                downloadedBytes = totalDownloadedAtomic.get(),
+                totalBytes = task.totalBytes,
+                speedBps = 0L,
+                etaSeconds = 0L,
+                isFailed = true,
+                errorMessage = e.message ?: "Download failed"
+            )
+        )
+    }
+}.flowOn(Dispatchers.IO)
 
     private fun applyBrowserContextHeaders(
         builder: Request.Builder,

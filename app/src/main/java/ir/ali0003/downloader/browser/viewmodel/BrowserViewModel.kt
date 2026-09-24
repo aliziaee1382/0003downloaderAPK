@@ -304,14 +304,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun enqueueDownload(
         mediaItem: SniffedMediaItem,
-        selectedQuality: VideoQualityOption?
+        selectedQuality: VideoQualityOption?,
+        freshSessionHeaders: Map<String, String> = emptyMap()
     ) {
         viewModelScope.launch {
             val downloadUrl = selectedQuality?.url ?: mediaItem.url
             val isM3u8 = mediaItem.isM3u8 || selectedQuality?.isHlsVariant == true
             val isAudio = selectedQuality?.formatTag?.contains("AUDIO", ignoreCase = true) == true ||
                     selectedQuality?.resolution?.contains("Audio", ignoreCase = true) == true
-            val totalBytes = selectedQuality?.estimatedSizeBytes ?: mediaItem.fileSizeBytes
+            // Do NOT use fake deterministic file sizes for HLS; keep 0L until segments are counted
+            val totalBytes = if (isM3u8) 0L else (selectedQuality?.estimatedSizeBytes ?: mediaItem.fileSizeBytes)
             val fileName = if (selectedQuality != null) {
                 var base = mediaItem.cleanFileName.substringBeforeLast('.')
                 if (base.endsWith(".m3u8", ignoreCase = true)) {
@@ -333,12 +335,48 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
 
-            // Populate headers JSON
+            // Populate headers JSON with fresh session context to eliminate 403 Forbidden
             val headersObj = try {
                 JSONObject(mediaItem.headersJson)
             } catch (_: Exception) {
                 JSONObject()
             }
+
+            // 1. Inject passed freshSessionHeaders
+            freshSessionHeaders.forEach { (k, v) ->
+                if (k.isNotBlank() && v.isNotBlank()) {
+                    headersObj.put(k, v)
+                }
+            }
+
+            // 2. Query CookieManager for fresh cookies right at tap-time
+            try {
+                val freshCookie = android.webkit.CookieManager.getInstance().getCookie(downloadUrl)
+                    ?: (if (mediaItem.pageUrl.isNotBlank()) android.webkit.CookieManager.getInstance().getCookie(mediaItem.pageUrl) else null)
+                if (!freshCookie.isNullOrBlank()) {
+                    headersObj.put("Cookie", freshCookie)
+                }
+            } catch (_: Exception) {}
+
+            // 3. Ensure Referer & Origin
+            if (!headersObj.has("Referer") && mediaItem.pageUrl.isNotBlank()) {
+                headersObj.put("Referer", mediaItem.pageUrl)
+            }
+            val refererForOrigin = headersObj.optString("Referer", mediaItem.pageUrl)
+            if (!headersObj.has("Origin") && refererForOrigin.isNotBlank()) {
+                try {
+                    val uri = android.net.Uri.parse(refererForOrigin)
+                    if (uri.scheme != null && uri.host != null) {
+                        headersObj.put("Origin", "${uri.scheme}://${uri.host}")
+                    }
+                } catch (_: Exception) {}
+            }
+
+            // 4. Ensure User-Agent
+            if (!headersObj.has("User-Agent")) {
+                headersObj.put("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+            }
+
             if (mediaItem.pageUrl.isNotBlank()) {
                 headersObj.put("webpageUrl", mediaItem.pageUrl)
             }

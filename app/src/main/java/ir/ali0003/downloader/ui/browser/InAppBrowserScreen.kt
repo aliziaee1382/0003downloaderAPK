@@ -543,7 +543,37 @@ fun InAppBrowserScreen(
                     viewModel.selectMedia(null)
                 },
                 onConfirmDownload = { item, quality ->
-                    viewModel.enqueueDownload(item, quality)
+                    val webUrl = webViewInstance?.url ?: currentUrl
+                    val webUa = webViewInstance?.settings?.userAgentString
+                    val targetUrl = quality?.url ?: item.url
+                    val freshCookies = try {
+                        android.webkit.CookieManager.getInstance().getCookie(targetUrl)
+                            ?: (if (webUrl.isNotBlank()) android.webkit.CookieManager.getInstance().getCookie(webUrl) else null)
+                    } catch (_: Exception) { null }
+
+                    val freshHeaders = mutableMapOf<String, String>()
+                    if (!freshCookies.isNullOrBlank()) {
+                        freshHeaders["Cookie"] = freshCookies
+                    }
+                    if (!webUa.isNullOrBlank()) {
+                        freshHeaders["User-Agent"] = webUa
+                    }
+                    val effectiveReferer = when {
+                        webUrl.isNotBlank() -> webUrl
+                        item.pageUrl.isNotBlank() -> item.pageUrl
+                        else -> targetUrl
+                    }
+                    if (effectiveReferer.isNotBlank()) {
+                        freshHeaders["Referer"] = effectiveReferer
+                        try {
+                            val uri = android.net.Uri.parse(effectiveReferer)
+                            if (uri.scheme != null && uri.host != null) {
+                                freshHeaders["Origin"] = "${uri.scheme}://${uri.host}"
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    viewModel.enqueueDownload(item, quality, freshHeaders)
                     showSnifferSheet = false
                     viewModel.selectMedia(null)
                 }

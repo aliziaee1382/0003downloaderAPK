@@ -62,6 +62,8 @@ class Phase2SnifferTest {
         assertEquals("https://cdn.example.com/video/1080p.m3u8", highest.url)
         assertTrue(highest.isHlsVariant)
         assertTrue(highest.label.contains("1080p"))
+        assertEquals(0L, highest.estimatedSizeBytes)
+        assertEquals("Adaptive Stream", highest.formattedSize)
 
         val lowest = qualities[2]
         assertEquals("640x360", lowest.resolution)
@@ -117,13 +119,14 @@ class Phase2SnifferTest {
         val baseUrl = "https://cdn.example.com/master.m3u8"
         val parsed = HlsManifestParser.parseManifestContent(multiResManifest, baseUrl)
 
-        // All 6 distinct resolutions are retained without being artificially replaced
-        assertEquals(6, parsed.size)
+        // All 7 declared variants are preserved without dropping valid video tracks
+        assertEquals(7, parsed.size)
 
-        // Deduplication between 1080p_high and 1080p_low kept the 5Mbps variant
-        val variant1080 = parsed.firstOrNull { it.resolution == "1920x1080" }
-        assertNotNull(variant1080)
-        assertEquals(5000000L, variant1080?.bandwidthBps)
+        // Both 1080p variants (5Mbps and 3.5Mbps) are preserved
+        val variants1080 = parsed.filter { it.resolution == "1920x1080" }
+        assertEquals(2, variants1080.size)
+        assertEquals(5000000L, variants1080[0].bandwidthBps)
+        assertEquals(3500000L, variants1080[1].bandwidthBps)
 
         // Highest bandwidth is 4K
         val highest = parsed[0]

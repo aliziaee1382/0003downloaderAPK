@@ -454,7 +454,7 @@ private fun DirectQualitySheetContent(
 
         // 5. Big Prominent "DOWNLOAD" Action Button
         val selectedBadge = selectedOption?.cleanResolutionBadge ?: "Best"
-        val selectedSize = selectedOption?.formattedSize ?: ""
+        val selectedSize = if (selectedOption?.isHlsVariant == true) "Adaptive Stream" else selectedOption?.formattedSize ?: ""
         val downloadButtonText = buildString {
             append("Download")
             if (selectedBadge.isNotBlank()) append(" • $selectedBadge")
@@ -616,10 +616,10 @@ private fun InShotQualityCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // Exact/Estimated File Size Pill
-                val displaySize = if (option.formattedSize.isNotBlank()) {
+                val displaySize = if (option.isHlsVariant) {
+                    "Adaptive Stream"
+                } else if (option.formattedSize.isNotBlank()) {
                     option.formattedSize
-                } else if (option.isHlsVariant) {
-                    "Adaptive HLS"
                 } else {
                     option.formatTag
                 }
@@ -797,13 +797,12 @@ private fun resolveComprehensiveQualities(item: SniffedMediaItem): List<VideoQua
 }
 
 /**
- * Deduplicate by URL and distinct quality tier, hide preview clips, and guarantee
- * that identical resolutions with identical file sizes never render twice.
+ * Sort options for sheet, separating video and audio, preserving all declared variants.
  */
 private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): List<VideoQualityOption> {
     if (list.isEmpty()) return emptyList()
 
-    // 1. Strict deduplication by clean URL
+    // 1. Deduplication by exact clean URL
     val urlDeduplicated = list
         .groupBy { it.url.substringBefore('?').substringBefore('#') }
         .mapNotNull { (_, options) ->
@@ -827,59 +826,24 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
         it.resolution.isNotBlank() && !it.label.contains("Direct Stream", ignoreCase = true)
     }
     val cleanVideos = if (hasNamedVideo) {
-        videoOptions.filterNot { it.label.contains("Direct Stream", ignoreCase = true) || it.resolution.isBlank() }
+        videoOptions.filterNot { it.label.contains("Direct Stream", ignoreCase = true) && it.resolution.isBlank() }
     } else {
         videoOptions
     }
 
-    // 4. Group streams by distinct resolution height (e.g., 1080, 720, 480, 360) and keep highest bandwidth
-    val distinctTiers = cleanVideos
-        .groupBy { opt ->
-            val h = opt.getResolutionHeight()
-            if (h > 0) "${h}p" else opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
-        }
-        .mapNotNull { (_, opts) ->
-            opts.maxWithOrNull(
-                compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
-                    .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                    .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
-            )
-        }
-
-    // 5. Present a clean, descending list from highest resolution to lowest resolution
-    val sortedVideos = distinctTiers.sortedWith(
+    // 4. Sort descending from highest resolution to lowest, then bandwidth descending
+    val sortedVideos = cleanVideos.sortedWith(
         compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
             .thenByDescending { it.bandwidthBps }
             .thenByDescending { it.estimatedSizeBytes }
     )
 
-    val coherentVideos = ir.ali0003.downloader.browser.sniffer.HlsManifestParser.enforceSizeCoherence(sortedVideos)
-
-    // 6. Never allow identical resolutions with the same file size to render twice
-    val uniqueVideos = mutableListOf<VideoQualityOption>()
-    val seenHeights = mutableSetOf<Int>()
-    val seenResolutions = mutableSetOf<String>()
-    val seenSizes = mutableSetOf<Long>()
-
-    for (opt in coherentVideos) {
-        val h = opt.getResolutionHeight()
-        val resKey = opt.cleanResolutionBadge.ifBlank { opt.resolution.ifBlank { opt.label } }
-        if (h > 0 && seenHeights.contains(h)) continue
-        if (resKey.isNotBlank() && seenResolutions.contains(resKey)) continue
-        if (opt.estimatedSizeBytes > 0L && seenSizes.contains(opt.estimatedSizeBytes)) continue
-
-        if (h > 0) seenHeights.add(h)
-        if (resKey.isNotBlank()) seenResolutions.add(resKey)
-        if (opt.estimatedSizeBytes > 0L) seenSizes.add(opt.estimatedSizeBytes)
-        uniqueVideos.add(opt)
-    }
-
     val bestAudio = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
 
     val combined = if (bestAudio != null) {
-        uniqueVideos + bestAudio
+        sortedVideos + bestAudio
     } else {
-        uniqueVideos
+        sortedVideos
     }
 
     return combined.ifEmpty { list.take(1) }

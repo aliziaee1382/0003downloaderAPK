@@ -274,53 +274,19 @@ object HlsManifestParser {
                 return HlsParseResult(emptyList(), fallbackDurationSeconds)
             }
 
-            // Retain genuine server-provided variants:
-            // 1. Group streams by distinct resolution height (e.g., 1080, 720, 480, 360) and keep highest bandwidth
-            // 2. Never filter out HLS variants based on megabytes. Keep all declared server variants.
-            val hasNamedVariants = rawVariants.any { it.resolution.isNotEmpty() }
-
-            val deduplicatedVariants = rawVariants
-                .filterNot { variant ->
-                    val isPreview = variant.url.contains("preview", ignoreCase = true) ||
-                            variant.url.contains("thumb", ignoreCase = true) ||
-                            variant.label.contains("preview", ignoreCase = true)
-                    isPreview && rawVariants.any { !it.url.contains("preview", ignoreCase = true) }
-                }
-                .filterNot { variant ->
-                    hasNamedVariants && (variant.resolution.isEmpty() || variant.label.equals("Variant Stream", ignoreCase = true))
-                }
-                .groupBy { variant ->
-                    if (variant.height > 0) "${variant.height}p" else variant.url.substringBefore('?').substringBefore('#')
-                }
-                .mapNotNull { (_, variantsInTier) ->
-                    variantsInTier.maxByOrNull { it.bandwidth }
-                }
+            // Preserve EVERY declared #EXT-X-STREAM-INF track variant (1080p, 720p, 480p, 360p, 240p, etc.)
+            // Strip out arbitrary heuristic filters, artificial bitrate drop rules, and preview deduplication
+            // Deduplicate only if identical URL is declared multiple times
+            val declaredVariants = rawVariants
+                .distinctBy { it.url }
                 .sortedWith(
                     compareByDescending<RawVariant> { it.height }
                         .thenByDescending { it.bandwidth }
                 )
 
-            // Read actual #EXTINF segment durations from the media playlist of the first variant
-            var actualDuration = 0.0
-            val probeVariant = deduplicatedVariants.firstOrNull()
-            if (probeVariant != null) {
-                actualDuration = fetchMediaPlaylistDuration(probeVariant.url, headersMap)
-            }
-
-            val finalDuration = when {
-                actualDuration > 0.0 -> actualDuration
-                fallbackDurationSeconds > 0.0 -> fallbackDurationSeconds
-                else -> 0.0
-            }
-
             val results = mutableListOf<VideoQualityOption>()
-            for (variant in deduplicatedVariants) {
-                val estimatedSize = if (finalDuration > 0.0 && variant.bandwidth > 0L) {
-                    ((variant.bandwidth * finalDuration) / 8.0).toLong()
-                } else {
-                    0L
-                }
-
+            for (variant in declaredVariants) {
+                // Do NOT calculate or display fake deterministic file sizes for HLS
                 results.add(
                     VideoQualityOption(
                         label = variant.label,
@@ -328,65 +294,65 @@ object HlsManifestParser {
                         bandwidthBps = variant.bandwidth,
                         url = variant.url,
                         isHlsVariant = true,
-                        estimatedSizeBytes = estimatedSize,
+                        estimatedSizeBytes = 0L,
                         formatTag = "HLS M3U8",
                         isExactSize = false
                     )
                 )
             }
 
+            // Also preserve declared audio-only renditions (#EXT-X-MEDIA:TYPE=AUDIO)
+            manifestText.lineSequence().forEach { line ->
+                val trimmed = line.trim()
+                if (trimmed.startsWith("#EXT-X-MEDIA:") && trimmed.contains("TYPE=AUDIO")) {
+                    val uriMatch = """URI="([^"]+)"""".toRegex().find(trimmed)
+                    val audioUri = uriMatch?.groupValues?.get(1)
+                    if (!audioUri.isNullOrBlank()) {
+                        val fullAudioUrl = resolveUrl(baseUrl, audioUri)
+                        if (results.none { it.url == fullAudioUrl }) {
+                            val groupMatch = """GROUP-ID="([^"]+)"""".toRegex().find(trimmed)
+                            val nameMatch = """NAME="([^"]+)"""".toRegex().find(trimmed)
+                            val audioName = nameMatch?.groupValues?.get(1) ?: groupMatch?.groupValues?.get(1) ?: "Audio"
+                            results.add(
+                                VideoQualityOption(
+                                    label = "Audio ($audioName)",
+                                    resolution = "Audio",
+                                    bandwidthBps = defaultAudioBandwidth ?: 128_000L,
+                                    url = fullAudioUrl,
+                                    isHlsVariant = true,
+                                    estimatedSizeBytes = 0L,
+                                    formatTag = "AUDIO",
+                                    isExactSize = false
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
             val sortedResults = results.sortedWith(
                 compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
                     .thenByDescending { it.bandwidthBps }
             )
-            val coherentResults = enforceSizeCoherence(sortedResults)
-            return HlsParseResult(coherentResults, finalDuration)
+            return HlsParseResult(sortedResults, fallbackDurationSeconds)
         }
 
         // Case B: Direct Media Playlist with #EXTINF segments directly
         if (manifestText.contains("#EXTINF:")) {
-            val segmentDuration = parseSegmentDurationsFromText(manifestText)
-            val finalDuration = when {
-                segmentDuration > 0.0 -> segmentDuration
-                fallbackDurationSeconds > 0.0 -> fallbackDurationSeconds
-                else -> 0.0
-            }
-
-            // Calculate exact total size of actual segments
-            val segmentCount = countSegments(manifestText)
-            val byteRangeTotal = parseByteRangeTotalSize(manifestText)
-
-            val calculatedTotalSize = when {
-                byteRangeTotal > 0L -> byteRangeTotal
-                segmentCount > 0 -> {
-                    val firstSegUrl = extractFirstSegmentUrl(manifestText, baseUrl)
-                    val firstSegSize = if (firstSegUrl.isNotBlank()) probeSegmentSize(firstSegUrl, headersMap) else 0L
-                    if (firstSegSize > 0L) firstSegSize * segmentCount else 0L
-                }
-                else -> 0L
-            }
-
-            // Probe or infer actual video resolution from URL / manifest text
             val (detectedRes, detectedLabel) = inferMediaPlaylistResolution(baseUrl, manifestText)
-
-            val calculatedBandwidth = if (finalDuration > 0.0 && calculatedTotalSize > 0L) {
-                (calculatedTotalSize * 8 / finalDuration).toLong()
-            } else {
-                0L
-            }
 
             val singleTier = VideoQualityOption(
                 label = detectedLabel,
                 resolution = detectedRes,
-                bandwidthBps = calculatedBandwidth,
+                bandwidthBps = 0L,
                 url = baseUrl,
                 isHlsVariant = true,
-                estimatedSizeBytes = calculatedTotalSize,
+                estimatedSizeBytes = 0L,
                 formatTag = "HLS M3U8",
-                isExactSize = (byteRangeTotal > 0L)
+                isExactSize = false
             )
 
-            return HlsParseResult(listOf(singleTier), finalDuration)
+            return HlsParseResult(listOf(singleTier), fallbackDurationSeconds)
         }
 
         return HlsParseResult(emptyList(), fallbackDurationSeconds)
