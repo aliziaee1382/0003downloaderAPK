@@ -42,6 +42,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -95,6 +96,15 @@ fun CompletedDownloadsScreen(
 ) {
     val context = LocalContext.current
     var showVaultSection by remember { mutableStateOf(false) }
+
+    // Automatically transition to vault view when unlocked, and back to library when locked
+    LaunchedEffect(isVaultUnlocked) {
+        if (isVaultUnlocked) {
+            showVaultSection = true
+        } else {
+            showVaultSection = false
+        }
+    }
 
     // Multi-selection state
     val selectedIds = remember { mutableStateListOf<Long>() }
@@ -162,13 +172,13 @@ fun CompletedDownloadsScreen(
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Icon(
-                            imageVector = if (isVaultUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
+                            imageVector = if (isVaultUnlocked) Icons.Default.LockOpen else Icons.Default.Security,
                             contentDescription = null,
                             tint = if (isVaultUnlocked) GlassTheme.colors.successGlass else GlassTheme.colors.accentGlow,
                             modifier = Modifier.size(14.dp)
                         )
                         Text(
-                            text = if (isVaultUnlocked) "Vault (${vaultDownloads.size})" else "Vault Locked",
+                            text = if (isVaultUnlocked) "Secret Vault (${vaultDownloads.size})" else "Secret Vault",
                             color = if (showVaultSection && isVaultUnlocked) GlassTheme.colors.accentGlow else GlassTheme.colors.textSecondary,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
@@ -248,7 +258,7 @@ fun CompletedDownloadsScreen(
                     // Move to Vault / Unhide
                     GlassButton(
                         text = if (showVaultSection) "Unhide" else "Hide to Vault",
-                        icon = if (showVaultSection) Icons.Default.VisibilityOff else Icons.Default.Lock,
+                        icon = if (showVaultSection) Icons.Default.LockOpen else Icons.Default.Security,
                         onClick = {
                             val selectedTasks = currentList.filter { selectedIds.contains(it.id) }
                             selectedTasks.forEach { onToggleVault(it) }
@@ -278,7 +288,7 @@ fun CompletedDownloadsScreen(
                 icon = if (showVaultSection) Icons.Default.Security else Icons.Default.Folder,
                 title = if (showVaultSection) "Secret Vault is Empty" else "No Completed Videos",
                 subtitle = if (showVaultSection) {
-                    "Long-press any video in the Public Library and tap 'Hide to Vault' to conceal it."
+                    "Long-press any video in the Public Library and select 'Move to Secret Vault' to protect it with PIN/Biometric encryption."
                 } else {
                     "Download videos through the in-app browser or active queue to access offline playback."
                 }

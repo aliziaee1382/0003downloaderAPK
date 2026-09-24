@@ -23,8 +23,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class VideoSnifferEngine(
+    private val context: Context? = null,
     private val onMediaDetected: (SniffedMediaItem) -> Unit
 ) {
+    private val appContext: Context?
+        get() = context?.applicationContext
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
     private val detectedUrls = ConcurrentHashMap.newKeySet<String>()
@@ -303,31 +307,50 @@ class VideoSnifferEngine(
             var finalDuration = durationSeconds
 
             if (isM3u8) {
-                // Parse HLS master playlist with deep segment duration calculation
-                val hlsResult = HlsManifestParser.fetchAndParseMasterPlaylist(
-                    masterUrl = mediaUrl,
-                    headersMap = fullHeaders,
-                    fallbackDurationSeconds = durationSeconds
-                )
-
-                if (hlsResult.parsedDurationSeconds > 0.0) {
-                    finalDuration = hlsResult.parsedDurationSeconds
+                // Primary: AndroidX Media3 DownloadHelper for genuine track groups and bitrates
+                val media3Result = if (appContext != null) {
+                    ir.ali0003.downloader.downloader.media3.Media3HlsHelper.extractHlsTracks(
+                        context = appContext!!,
+                        manifestUrl = mediaUrl,
+                        headers = fullHeaders,
+                        fallbackDurationSeconds = durationSeconds
+                    )
+                } else {
+                    null
                 }
 
-                qualities = if (hlsResult.qualities.isNotEmpty()) {
-                    hlsResult.qualities
+                if (media3Result != null && media3Result.qualities.isNotEmpty()) {
+                    qualities = media3Result.qualities
+                    if (media3Result.durationSeconds > 0.0) {
+                        finalDuration = media3Result.durationSeconds
+                    }
                 } else {
-                    listOf(
-                        VideoQualityOption(
-                            label = "Direct Stream",
-                            resolution = "",
-                            bandwidthBps = 0L,
-                            url = mediaUrl,
-                            isHlsVariant = true,
-                            estimatedSizeBytes = 0L,
-                            formatTag = "HLS M3U8"
-                        )
+                    // Fallback to HlsManifestParser
+                    val hlsResult = HlsManifestParser.fetchAndParseMasterPlaylist(
+                        masterUrl = mediaUrl,
+                        headersMap = fullHeaders,
+                        fallbackDurationSeconds = durationSeconds
                     )
+
+                    if (hlsResult.parsedDurationSeconds > 0.0) {
+                        finalDuration = hlsResult.parsedDurationSeconds
+                    }
+
+                    qualities = if (hlsResult.qualities.isNotEmpty()) {
+                        hlsResult.qualities
+                    } else {
+                        listOf(
+                            VideoQualityOption(
+                                label = "Direct Stream",
+                                resolution = "",
+                                bandwidthBps = 0L,
+                                url = mediaUrl,
+                                isHlsVariant = true,
+                                estimatedSizeBytes = 0L,
+                                formatTag = "HLS M3U8"
+                            )
+                        )
+                    }
                 }
 
                 detectedSize = qualities.firstOrNull()?.estimatedSizeBytes ?: 0L

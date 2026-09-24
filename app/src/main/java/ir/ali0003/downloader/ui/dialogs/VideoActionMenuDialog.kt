@@ -24,7 +24,9 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -241,9 +243,9 @@ fun VideoActionMenuDialog(
                 // Action 3: Move to Vault / Encrypt
                 val isVaulted = task.isHidden
                 ActionItemRow(
-                    title = if (isVaulted) "Unhide from Vault" else "Move to Vault / Encrypt",
-                    subtitle = if (isVaulted) "Restore to public device media library" else "Conceal video with AES-256 encryption",
-                    icon = if (isVaulted) Icons.Default.LockOpen else Icons.Default.Lock,
+                    title = if (isVaulted) "Unhide from Secret Vault" else "Move to Secret Vault",
+                    subtitle = if (isVaulted) "Restore to Public Library and unhide file" else "Conceal with PIN & Biometric protection",
+                    icon = if (isVaulted) Icons.Default.LockOpen else Icons.Default.Security,
                     iconTint = if (isVaulted) GlassTheme.colors.successGlass else GlassTheme.colors.accentGlow,
                     iconBackground = if (isVaulted) GlassTheme.colors.successGlass.copy(alpha = 0.15f) else GlassTheme.colors.accentGlow.copy(alpha = 0.15f),
                     testTag = "action_vault_video",

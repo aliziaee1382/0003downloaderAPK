@@ -135,13 +135,17 @@ fun InAppVideoPlayerSheet(
     val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableIntStateOf(2) } // default 1.0x
 
-    // Create ExoPlayer instance with explicit AudioAttributes
+    // Create ExoPlayer instance with explicit AudioAttributes and Media3 Cache DataSource
     val exoPlayer = remember {
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
+        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+            ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getCacheDataSourceFactory(context)
+        )
         ExoPlayer.Builder(context)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build().apply {

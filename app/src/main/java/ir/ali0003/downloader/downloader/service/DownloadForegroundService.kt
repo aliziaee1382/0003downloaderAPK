@@ -48,6 +48,25 @@ class DownloadForegroundService : Service() {
             val intent = Intent(context, DownloadForegroundService::class.java)
             context.stopService(intent)
         }
+
+        fun updateProgress(
+            context: Context,
+            taskName: String,
+            progressPercent: Int,
+            speedText: String,
+            etaText: String,
+            taskId: Long
+        ) {
+            activeInstance?.updateDownloadProgress(
+                taskName = taskName,
+                progressPercent = progressPercent,
+                speedText = speedText,
+                etaText = etaText,
+                taskId = taskId
+            )
+        }
+
+        private var activeInstance: DownloadForegroundService? = null
     }
 
     private lateinit var notificationManager: NotificationManager
@@ -55,6 +74,7 @@ class DownloadForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createNotificationChannel()
 
@@ -75,18 +95,22 @@ class DownloadForegroundService : Service() {
         ServiceCompat.startForeground(this, NOTIFICATION_ID, initialNotification, foregroundType)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        if (activeInstance == this) {
+            activeInstance = null
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         intent?.let {
             val taskId = it.getLongExtra(EXTRA_TASK_ID, -1L)
-            when (it.action) {
-                ACTION_PAUSE -> {
-                    // Handled by DownloadManagerController broadcast or controller binding
-                }
-                ACTION_RESUME -> {
-                    // Handled by controller
-                }
-                ACTION_CANCEL -> {
-                    // Handled by controller
+            if (taskId > 0L) {
+                val controller = ir.ali0003.downloader.downloader.manager.DownloadManagerController.getInstance(applicationContext)
+                when (it.action) {
+                    ACTION_PAUSE -> controller.pauseTask(taskId)
+                    ACTION_RESUME -> controller.resumeTask(taskId)
+                    ACTION_CANCEL -> controller.cancelTask(taskId)
                 }
             }
         }

@@ -157,7 +157,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val downloadToastMessage: StateFlow<String?> = _downloadToastMessage.asStateFlow()
 
     // Sniffer Engine instance
-    val snifferEngine = VideoSnifferEngine { detectedCanonical ->
+    val snifferEngine = VideoSnifferEngine(context = application) { detectedCanonical ->
         viewModelScope.launch {
             val current = _sniffedMediaList.value
             val hasRichNativeMedia = current.any { it.qualities.any { q -> q.isYoutubeDl } }
@@ -341,6 +341,17 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
             if (mediaItem.pageUrl.isNotBlank()) {
                 headersObj.put("webpageUrl", mediaItem.pageUrl)
+            }
+            if (selectedQuality != null) {
+                if (!selectedQuality.renditionKey.isNullOrBlank()) {
+                    headersObj.put("media3_rendition_key", selectedQuality.renditionKey)
+                }
+                if (selectedQuality.resolution.isNotBlank()) {
+                    headersObj.put("target_resolution", selectedQuality.resolution)
+                }
+                if (selectedQuality.bandwidthBps > 0L) {
+                    headersObj.put("target_bitrate", selectedQuality.bandwidthBps)
+                }
             }
 
             downloadRepository.enqueueDownload(

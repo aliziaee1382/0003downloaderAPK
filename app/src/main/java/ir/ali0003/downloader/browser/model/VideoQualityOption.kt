@@ -11,7 +11,8 @@ data class VideoQualityOption(
     val estimatedSizeBytes: Long = 0L,
     val formatTag: String = "MP4",
     val formatId: String? = null,
-    val isYoutubeDl: Boolean = false
+    val isYoutubeDl: Boolean = false,
+    val renditionKey: String? = null
 ) {
     val formattedSize: String
         get() {

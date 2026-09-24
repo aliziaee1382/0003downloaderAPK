@@ -116,6 +116,19 @@ class DownloadManagerController(
                         progress.speedBps
                     )
 
+                    // Forward notification progress to foreground service
+                    val percent = (progress.progress * 100).toInt()
+                    val speedText = if (progress.speedBps > 0) "${task.formattedSpeed}" else ""
+                    val etaText = progress.formattedEta
+                    DownloadForegroundService.updateProgress(
+                        context = context,
+                        taskName = task.fileName,
+                        progressPercent = percent,
+                        speedText = speedText,
+                        etaText = etaText,
+                        taskId = task.id
+                    )
+
                     if (progress.isCompleted) {
                         downloadDao.markCompleted(task.id, System.currentTimeMillis())
                         activeJobs.remove(task.id)
@@ -135,6 +148,10 @@ class DownloadManagerController(
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         scope.launch {
+            val task = downloadDao.findDownloadById(taskId)
+            if (task != null) {
+                downloadEngine.pauseDownload(task)
+            }
             downloadDao.updateStatus(taskId, DownloadStatus.PAUSED)
         }
     }
@@ -143,6 +160,7 @@ class DownloadManagerController(
         scope.launch {
             val task = downloadDao.findDownloadById(taskId)
             if (task != null) {
+                downloadEngine.resumeDownload(task)
                 downloadDao.updateStatus(taskId, DownloadStatus.QUEUED)
             }
         }
@@ -152,6 +170,10 @@ class DownloadManagerController(
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
         scope.launch {
+            val task = downloadDao.findDownloadById(taskId)
+            if (task != null) {
+                downloadEngine.cancelDownload(task)
+            }
             downloadDao.deleteDownloadById(taskId)
         }
     }
