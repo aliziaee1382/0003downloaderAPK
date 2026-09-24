@@ -7,6 +7,7 @@ package ir.ali0003.downloader.ui.player
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
@@ -136,13 +137,14 @@ fun InAppVideoPlayerSheet(
     var currentSpeedIndex by remember { mutableIntStateOf(2) } // default 1.0x
 
     // Create ExoPlayer instance with explicit AudioAttributes and Media3 Cache DataSource
-    val exoPlayer = remember {
+    val exoPlayer = remember(task.id) {
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
+        val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
         val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
-            ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getCacheDataSourceFactory(context)
+            ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getCacheDataSourceFactory(context, headers)
         )
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -180,35 +182,48 @@ fun InAppVideoPlayerSheet(
         }
     }
 
-    // Resolve media URI (from Vault file, public storage, or direct URL)
-    LaunchedEffect(task) {
+    // Resolve media URI: seamlessly handling Media3 SimpleCache offline HLS, local files, and direct streams
+    LaunchedEffect(task.id) {
+        val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
         val targetFile = vaultFileManager.resolveTaskFile(task)
-        val mediaUri = if (targetFile != null && targetFile.exists()) {
-            Uri.fromFile(targetFile)
-        } else {
-            Uri.parse(task.url)
-        }
+        val isLocalProgressiveFile = targetFile != null &&
+                targetFile.exists() &&
+                targetFile.length() > 512L &&
+                !isPlaceholderFile(targetFile)
 
-        val mediaItem = if (targetFile != null && targetFile.exists()) {
-            // Offline local file: If it was an HLS download saved as .m3u8, override MIME so ExoPlayer decodes it as MPEG-TS/video stream
-            val fileNameLower = (targetFile.name).lowercase()
-            if (fileNameLower.endsWith(".m3u8") || task.isM3u8) {
-                MediaItem.Builder()
-                    .setUri(mediaUri)
-                    .setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP2T)
-                    .build()
-            } else {
-                MediaItem.fromUri(mediaUri)
+        // Make sure headers are registered in provider
+        val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
+        ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.registerRequestHeaders(task.url, headers)
+
+        val mediaItem = if (isHls && !isLocalProgressiveFile) {
+            // Offline HLS downloaded via Media3 or online stream backed by CacheDataSource
+            MediaItem.Builder()
+                .setUri(Uri.parse(task.url))
+                .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                .build()
+        } else if (isLocalProgressiveFile && targetFile != null) {
+            val fileNameLower = targetFile.name.lowercase()
+            val mimeType = when {
+                fileNameLower.endsWith(".webm") -> androidx.media3.common.MimeTypes.VIDEO_WEBM
+                fileNameLower.endsWith(".mkv") -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
+                fileNameLower.endsWith(".mp3") -> androidx.media3.common.MimeTypes.AUDIO_MPEG
+                fileNameLower.endsWith(".m4a") -> androidx.media3.common.MimeTypes.AUDIO_AAC
+                fileNameLower.endsWith(".ts") -> androidx.media3.common.MimeTypes.VIDEO_MP2T
+                else -> androidx.media3.common.MimeTypes.VIDEO_MP4
             }
+            MediaItem.Builder()
+                .setUri(Uri.fromFile(targetFile))
+                .setMimeType(mimeType)
+                .build()
         } else {
-            // Online direct or streaming URL
-            if (task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)) {
+            // Online direct or streaming URL fallback
+            if (isHls) {
                 MediaItem.Builder()
-                    .setUri(mediaUri)
+                    .setUri(Uri.parse(task.url))
                     .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
                     .build()
             } else {
-                MediaItem.fromUri(mediaUri)
+                MediaItem.fromUri(Uri.parse(task.url))
             }
         }
 
@@ -228,6 +243,24 @@ fun InAppVideoPlayerSheet(
                 isBuffering = playbackState == Player.STATE_BUFFERING
                 if (playbackState == Player.STATE_READY) {
                     duration = exoPlayer.duration.coerceAtLeast(0L)
+                }
+            }
+
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                Log.e("InAppVideoPlayer", "Playback error: ${error.message}", error)
+                if (exoPlayer.currentMediaItem?.localConfiguration?.uri?.scheme == "file" && task.url.isNotBlank()) {
+                    Log.d("InAppVideoPlayer", "Falling back to stream URL: ${task.url}")
+                    val fallbackItem = if (task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)) {
+                        MediaItem.Builder()
+                            .setUri(Uri.parse(task.url))
+                            .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                            .build()
+                    } else {
+                        MediaItem.fromUri(Uri.parse(task.url))
+                    }
+                    exoPlayer.setMediaItem(fallbackItem)
+                    exoPlayer.prepare()
+                    exoPlayer.play()
                 }
             }
         }
@@ -804,5 +837,19 @@ private fun formatDuration(millis: Long): String {
         String.format("%d:%02d:%02d", hours, minutes, seconds)
     } else {
         String.format("%02d:%02d", minutes, seconds)
+    }
+}
+
+private fun isPlaceholderFile(file: File): Boolean {
+    if (!file.exists() || file.length() < 100L) return true
+    return try {
+        if (file.length() < 256L) {
+            val content = file.readText().trim()
+            content.startsWith("MEDIA3_OFFLINE_CACHE_COMPLETED")
+        } else {
+            false
+        }
+    } catch (_: Exception) {
+        false
     }
 }

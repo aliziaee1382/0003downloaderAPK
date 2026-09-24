@@ -45,7 +45,52 @@ class ChunkDownloader(
                 .followSslRedirects(true)
                 .build()
         }
+
+        fun parseHeaders(headersJson: String?, url: String? = null): Map<String, String> {
+            val map = mutableMapOf<String, String>()
+            if (!headersJson.isNullOrBlank()) {
+                try {
+                    val json = JSONObject(headersJson)
+                    json.keys().forEach { key ->
+                        val v = json.optString(key)
+                        if (key.isNotBlank() && v.isNotBlank()) {
+                            map[key] = v
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse headersJson: ${e.message}")
+                }
+            }
+
+            if (!url.isNullOrBlank()) {
+                try {
+                    if (!map.containsKey("Cookie") && !map.containsKey("cookie")) {
+                        val cookie = android.webkit.CookieManager.getInstance().getCookie(url)
+                        if (!cookie.isNullOrBlank()) {
+                            map["Cookie"] = cookie
+                        }
+                    }
+                } catch (_: Exception) {}
+                try {
+                    if (!map.containsKey("Referer") && !map.containsKey("referer")) {
+                        val uri = android.net.Uri.parse(url)
+                        if (uri.scheme != null && uri.host != null) {
+                            map["Referer"] = "${uri.scheme}://${uri.host}/"
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+
+            if (!map.containsKey("User-Agent") && !map.containsKey("user-agent")) {
+                map["User-Agent"] = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+            }
+
+            return map
+        }
     }
+
+    fun parseHeaders(headersJson: String?, url: String? = null): Map<String, String> =
+        parseHeaders(headersJson, url)
 
     /**
      * Executes multi-chunk or single-stream download, emitting real-time DownloadProgress.
@@ -400,48 +445,6 @@ class ChunkDownloader(
             }
         }
         return totalRead
-    }
-
-    fun parseHeaders(headersJson: String?, url: String? = null): Map<String, String> {
-        val map = mutableMapOf<String, String>()
-        if (!headersJson.isNullOrBlank()) {
-            try {
-                val json = JSONObject(headersJson)
-                json.keys().forEach { key ->
-                    val v = json.optString(key)
-                    if (key.isNotBlank() && v.isNotBlank()) {
-                        map[key] = v
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse headersJson: ${e.message}")
-            }
-        }
-
-        if (!url.isNullOrBlank()) {
-            try {
-                if (!map.containsKey("Cookie") && !map.containsKey("cookie")) {
-                    val cookie = android.webkit.CookieManager.getInstance().getCookie(url)
-                    if (!cookie.isNullOrBlank()) {
-                        map["Cookie"] = cookie
-                    }
-                }
-            } catch (_: Exception) {}
-            try {
-                if (!map.containsKey("Referer") && !map.containsKey("referer")) {
-                    val uri = android.net.Uri.parse(url)
-                    if (uri.scheme != null && uri.host != null) {
-                        map["Referer"] = "${uri.scheme}://${uri.host}/"
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-
-        if (!map.containsKey("User-Agent") && !map.containsKey("user-agent")) {
-            map["User-Agent"] = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-        }
-
-        return map
     }
 
     private data class ServerProbeResult(

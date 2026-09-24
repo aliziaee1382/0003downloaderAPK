@@ -118,7 +118,9 @@ class VaultFileManager(
      */
     fun resolveTaskFile(task: DownloadTaskEntity): File? {
         val cleanName = task.fileName.trimStart('.')
+        val sanitizedName = cleanName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
         val hiddenName = ".$cleanName$VAULT_EXTENSION"
+        val hiddenSanitizedName = ".$sanitizedName$VAULT_EXTENSION"
 
         val altCleanName = when {
             cleanName.endsWith(".m3u8", ignoreCase = true) -> cleanName.removeSuffix(".m3u8") + ".mp4"
@@ -126,31 +128,45 @@ class VaultFileManager(
             else -> null
         }
         val altHiddenName = altCleanName?.let { ".$it$VAULT_EXTENSION" }
+        val altSanitizedName = altCleanName?.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+        val altHiddenSanitizedName = altSanitizedName?.let { ".$it$VAULT_EXTENSION" }
 
         val possiblePaths = mutableListOf(
             File(vaultDir, hiddenName),
+            File(vaultDir, hiddenSanitizedName),
             File(vaultDir, cleanName),
+            File(vaultDir, sanitizedName),
             File(publicDownloadsDir, cleanName),
+            File(publicDownloadsDir, sanitizedName),
             File(context.filesDir, "vault_media/$cleanName"),
+            File(context.filesDir, "vault_media/$sanitizedName"),
             File(context.filesDir, "vault_media/$hiddenName"),
-            File(context.filesDir, cleanName)
+            File(context.filesDir, "vault_media/$hiddenSanitizedName"),
+            File(context.filesDir, cleanName),
+            File(context.filesDir, sanitizedName)
         )
 
         if (altCleanName != null) {
             possiblePaths.add(File(publicDownloadsDir, altCleanName))
+            if (altSanitizedName != null) possiblePaths.add(File(publicDownloadsDir, altSanitizedName))
             possiblePaths.add(File(vaultDir, altCleanName))
+            if (altSanitizedName != null) possiblePaths.add(File(vaultDir, altSanitizedName))
             possiblePaths.add(File(context.filesDir, altCleanName))
+            if (altSanitizedName != null) possiblePaths.add(File(context.filesDir, altSanitizedName))
             possiblePaths.add(File(context.filesDir, "vault_media/$altCleanName"))
+            if (altSanitizedName != null) possiblePaths.add(File(context.filesDir, "vault_media/$altSanitizedName"))
         }
         if (altHiddenName != null) {
             possiblePaths.add(File(vaultDir, altHiddenName))
+            if (altHiddenSanitizedName != null) possiblePaths.add(File(vaultDir, altHiddenSanitizedName))
             possiblePaths.add(File(context.filesDir, "vault_media/$altHiddenName"))
+            if (altHiddenSanitizedName != null) possiblePaths.add(File(context.filesDir, "vault_media/$altHiddenSanitizedName"))
         }
 
         return possiblePaths.firstOrNull { it.exists() } ?: if (task.isHidden) {
-            File(vaultDir, hiddenName)
+            File(vaultDir, hiddenSanitizedName)
         } else {
-            File(publicDownloadsDir, cleanName)
+            File(publicDownloadsDir, sanitizedName)
         }
     }
 

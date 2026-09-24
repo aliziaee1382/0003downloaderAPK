@@ -107,16 +107,20 @@ object Media3DownloadManagerProvider {
     }
 
     /**
-     * Read-only DataSource.Factory backed by SimpleCache.
+     * Read-only DataSource.Factory backed by SimpleCache and DefaultDataSource (supporting file://, content://, and http(s)://).
      */
     fun getCacheDataSourceFactory(
         context: Context,
         customHeaders: Map<String, String> = emptyMap()
     ): DataSource.Factory {
-        val upstreamFactory = getHttpDataSourceFactory(context, customHeaders)
+        val httpFactory = getHttpDataSourceFactory(context, customHeaders)
+        val defaultDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(
+            context.applicationContext,
+            httpFactory
+        )
         return CacheDataSource.Factory()
             .setCache(getDownloadCache(context))
-            .setUpstreamDataSourceFactory(upstreamFactory)
+            .setUpstreamDataSourceFactory(defaultDataSourceFactory)
             .setCacheWriteDataSinkFactory(null)
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }

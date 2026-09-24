@@ -619,7 +619,8 @@ class VideoSnifferEngine(
                 url = mediaUrl,
                 isHlsVariant = false,
                 estimatedSizeBytes = fileSizeBytes,
-                formatTag = "AUDIO"
+                formatTag = "AUDIO",
+                isExactSize = (fileSizeBytes > 0L)
             )
         }
 
@@ -750,7 +751,8 @@ class VideoSnifferEngine(
             url = mediaUrl,
             isHlsVariant = false,
             estimatedSizeBytes = fileSizeBytes,
-            formatTag = formatTag
+            formatTag = formatTag,
+            isExactSize = (fileSizeBytes > 0L)
         )
     }
 

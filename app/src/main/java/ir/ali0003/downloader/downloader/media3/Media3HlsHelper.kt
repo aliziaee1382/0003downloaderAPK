@@ -78,6 +78,33 @@ object Media3HlsHelper {
                             val options = mutableListOf<VideoQualityOption>()
                             val periodCount = helper.periodCount
 
+                            // Detect highest audio bitrate from separate audio tracks if present
+                            var detectedAudioBitrate = 0L
+                            var hasAudioTracks = false
+                            for (pIdx in 0 until periodCount) {
+                                val pTracks = helper.getTracks(pIdx)
+                                for (gInfo in pTracks.groups) {
+                                    if (gInfo.type == C.TRACK_TYPE_AUDIO) {
+                                        hasAudioTracks = true
+                                        val aGroup = gInfo.mediaTrackGroup
+                                        for (aIdx in 0 until aGroup.length) {
+                                            val aFormat = aGroup.getFormat(aIdx)
+                                            val aBw = if (aFormat.averageBitrate != androidx.media3.common.Format.NO_VALUE && aFormat.averageBitrate > 0) {
+                                                aFormat.averageBitrate.toLong()
+                                            } else if (aFormat.bitrate != androidx.media3.common.Format.NO_VALUE && aFormat.bitrate > 0) {
+                                                aFormat.bitrate.toLong()
+                                            } else 128_000L
+                                            if (aBw > detectedAudioBitrate) {
+                                                detectedAudioBitrate = aBw
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (hasAudioTracks && detectedAudioBitrate == 0L) {
+                                detectedAudioBitrate = 128_000L
+                            }
+
                             for (periodIndex in 0 until periodCount) {
                                 val tracks: Tracks = helper.getTracks(periodIndex)
                                 for (trackGroupInfo in tracks.groups) {
@@ -89,14 +116,22 @@ object Media3HlsHelper {
                                             val format = group.getFormat(trackIndex)
                                             val width = format.width
                                             val height = format.height
-                                            val bitrate = if (format.bitrate != androidx.media3.common.Format.NO_VALUE && format.bitrate > 0) {
+                                            // Check AVERAGE-BANDWIDTH first before falling back to BANDWIDTH (peak)
+                                            val videoBitrate = if (format.averageBitrate != androidx.media3.common.Format.NO_VALUE && format.averageBitrate > 0) {
+                                                format.averageBitrate.toLong()
+                                            } else if (format.bitrate != androidx.media3.common.Format.NO_VALUE && format.bitrate > 0) {
                                                 format.bitrate.toLong()
                                             } else if (format.peakBitrate != androidx.media3.common.Format.NO_VALUE && format.peakBitrate > 0) {
                                                 format.peakBitrate.toLong()
-                                            } else if (format.averageBitrate != androidx.media3.common.Format.NO_VALUE && format.averageBitrate > 0) {
-                                                format.averageBitrate.toLong()
                                             } else {
                                                 0L
+                                            }
+
+                                            // If both audio and video renditions exist in separate adaptation sets, SUM the bandwidths
+                                            val totalBitrate = if (hasAudioTracks && videoBitrate > 0L) {
+                                                videoBitrate + detectedAudioBitrate
+                                            } else {
+                                                videoBitrate
                                             }
 
                                             val resolution = if (width > 0 && height > 0) "${width}x${height}" else ""
@@ -113,8 +148,8 @@ object Media3HlsHelper {
 
                                             // Estimated size calculation: Bitrate (bps) * duration (s) / 8
                                             val effectiveDuration = if (fallbackDurationSeconds > 0) fallbackDurationSeconds else 60.0
-                                            val estimatedSize = if (bitrate > 0L) {
-                                                (bitrate * effectiveDuration / 8.0).toLong()
+                                            val estimatedSize = if (totalBitrate > 0L) {
+                                                (totalBitrate * effectiveDuration / 8.0).toLong()
                                             } else {
                                                 // Fallback proportional size heuristic by height
                                                 when {
@@ -125,19 +160,20 @@ object Media3HlsHelper {
                                                 }
                                             }
 
-                                            val renditionKey = "p${periodIndex}_video_${width}x${height}_b${bitrate}"
+                                            val renditionKey = "p${periodIndex}_video_${width}x${height}_b${totalBitrate}"
 
                                             options.add(
                                                 VideoQualityOption(
                                                     label = cleanLabel,
                                                     resolution = resolution,
-                                                    bandwidthBps = bitrate,
+                                                    bandwidthBps = totalBitrate,
                                                     url = manifestUrl,
                                                     isHlsVariant = true,
                                                     estimatedSizeBytes = estimatedSize,
                                                     formatTag = "HLS M3U8",
                                                     formatId = format.id,
-                                                    renditionKey = renditionKey
+                                                    renditionKey = renditionKey,
+                                                    isExactSize = false
                                                 )
                                             )
                                         }

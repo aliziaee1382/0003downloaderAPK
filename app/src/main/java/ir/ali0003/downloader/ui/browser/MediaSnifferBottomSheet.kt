@@ -615,7 +615,14 @@ private fun InShotQualityCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Exact File Size Pill
+                // Exact/Estimated File Size Pill
+                val displaySize = if (option.formattedSize.isNotBlank()) {
+                    option.formattedSize
+                } else if (option.isHlsVariant) {
+                    "Adaptive HLS"
+                } else {
+                    option.formatTag
+                }
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -628,7 +635,7 @@ private fun InShotQualityCard(
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = option.formattedSize,
+                        text = displaySize,
                         color = GlassTheme.colors.textPrimary,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold

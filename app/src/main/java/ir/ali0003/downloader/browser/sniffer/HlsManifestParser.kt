@@ -173,6 +173,33 @@ object HlsManifestParser {
 
         // Case A: Master Playlist containing variant streams (#EXT-X-STREAM-INF)
         if (manifestText.contains("#EXT-X-STREAM-INF:")) {
+            // Parse audio renditions in separate adaptation sets (#EXT-X-MEDIA:TYPE=AUDIO)
+            val audioGroupBandwidths = mutableMapOf<String, Long>()
+            var defaultAudioBandwidth: Long? = null
+            var hasSeparateAudioRenditions = false
+
+            manifestText.lineSequence().forEach { line ->
+                val trimmed = line.trim()
+                if (trimmed.startsWith("#EXT-X-MEDIA:") && trimmed.contains("TYPE=AUDIO")) {
+                    hasSeparateAudioRenditions = true
+                    val groupMatch = """GROUP-ID="([^"]+)"""".toRegex().find(trimmed)
+                    val groupId = groupMatch?.groupValues?.get(1)
+
+                    val bwMatch = """(?:AVERAGE-BANDWIDTH|BANDWIDTH)=(\d+)""".toRegex().find(trimmed)
+                    val bw = bwMatch?.groupValues?.get(1)?.toLongOrNull()
+
+                    if (groupId != null && bw != null && bw > 0L) {
+                        audioGroupBandwidths[groupId] = bw
+                    }
+                    if (bw != null && bw > 0L && defaultAudioBandwidth == null) {
+                        defaultAudioBandwidth = bw
+                    }
+                }
+            }
+            if (hasSeparateAudioRenditions && defaultAudioBandwidth == null) {
+                defaultAudioBandwidth = 128_000L
+            }
+
             val rawVariants = mutableListOf<RawVariant>()
             val reader = BufferedReader(StringReader(manifestText))
             var line: String?
@@ -186,18 +213,40 @@ object HlsManifestParser {
                     lastStreamInf = currentLine
                 } else if (!currentLine.startsWith("#") && lastStreamInf != null) {
                     val streamUrl = resolveUrl(baseUrl, currentLine)
-                    val bandwidth = extractBandwidth(lastStreamInf)
+                    val videoBandwidth = extractBandwidth(lastStreamInf)
                     val (w, h) = extractResolutionDimensions(lastStreamInf)
+
+                    // Check for separate audio adaptation set to SUM bandwidths
+                    val audioGroup = """AUDIO="([^"]+)"""".toRegex().find(lastStreamInf)?.groupValues?.get(1)
+                    val codecs = """CODECS="([^"]+)"""".toRegex().find(lastStreamInf)?.groupValues?.get(1) ?: ""
+                    val hasAudioCodec = codecs.contains("mp4a", ignoreCase = true) ||
+                            codecs.contains("aac", ignoreCase = true) ||
+                            codecs.contains("ac-3", ignoreCase = true) ||
+                            codecs.contains("ec-3", ignoreCase = true)
+
+                    val audioBandwidth = if (audioGroup != null) {
+                        audioGroupBandwidths[audioGroup] ?: defaultAudioBandwidth ?: 128_000L
+                    } else if (hasSeparateAudioRenditions && !hasAudioCodec) {
+                        defaultAudioBandwidth ?: 128_000L
+                    } else {
+                        0L
+                    }
+
+                    val totalBandwidth = if (audioBandwidth > 0L && videoBandwidth > 0L) {
+                        videoBandwidth + audioBandwidth
+                    } else {
+                        videoBandwidth
+                    }
 
                     val (effectiveW, effectiveH) = if (w > 0 && h > 0) {
                         w to h
-                    } else if (bandwidth > 0L) {
+                    } else if (totalBandwidth > 0L) {
                         when {
-                            bandwidth >= 12_000_000L -> 3840 to 2160
-                            bandwidth >= 7_000_000L -> 2560 to 1440
-                            bandwidth >= 3_500_000L -> 1920 to 1080
-                            bandwidth in 1_600_000L..3_499_999L -> 1280 to 720
-                            bandwidth in 750_000L..1_599_999L -> 854 to 480
+                            totalBandwidth >= 12_000_000L -> 3840 to 2160
+                            totalBandwidth >= 7_000_000L -> 2560 to 1440
+                            totalBandwidth >= 3_500_000L -> 1920 to 1080
+                            totalBandwidth in 1_600_000L..3_499_999L -> 1280 to 720
+                            totalBandwidth in 750_000L..1_599_999L -> 854 to 480
                             else -> 640 to 360
                         }
                     } else {
@@ -205,12 +254,12 @@ object HlsManifestParser {
                     }
 
                     val resStr = if (w > 0 && h > 0) "${w}x${h}" else if (effectiveH > 0) "${effectiveH}p" else ""
-                    val label = formatQualityLabel(w, h, bandwidth)
+                    val label = formatQualityLabel(w, h, totalBandwidth)
 
                     rawVariants.add(
                         RawVariant(
                             url = streamUrl,
-                            bandwidth = bandwidth,
+                            bandwidth = totalBandwidth,
                             width = if (w > 0) w else effectiveW,
                             height = if (h > 0) h else effectiveH,
                             resolution = resStr,
@@ -280,7 +329,8 @@ object HlsManifestParser {
                         url = variant.url,
                         isHlsVariant = true,
                         estimatedSizeBytes = estimatedSize,
-                        formatTag = "HLS M3U8"
+                        formatTag = "HLS M3U8",
+                        isExactSize = false
                     )
                 )
             }
@@ -332,7 +382,8 @@ object HlsManifestParser {
                 url = baseUrl,
                 isHlsVariant = true,
                 estimatedSizeBytes = calculatedTotalSize,
-                formatTag = "HLS M3U8"
+                formatTag = "HLS M3U8",
+                isExactSize = (byteRangeTotal > 0L)
             )
 
             return HlsParseResult(listOf(singleTier), finalDuration)

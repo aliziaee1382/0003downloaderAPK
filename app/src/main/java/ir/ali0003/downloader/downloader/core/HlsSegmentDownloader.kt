@@ -57,7 +57,7 @@ class HlsSegmentDownloader(
     ): Flow<DownloadProgress> = flow {
         val taskId = task.id
         val manifestUrl = task.url
-        val headers = parseHeaders(task.headersJson, manifestUrl)
+        val headers = parseHeaders(task.headersJson)
 
         Log.d(TAG, "Starting HLS download for Task $taskId from: $manifestUrl")
 
@@ -148,55 +148,9 @@ class HlsSegmentDownloader(
 
     }.flowOn(Dispatchers.IO)
 
-    private fun applyBrowserContextHeaders(
-        builder: Request.Builder,
-        headers: Map<String, String>,
-        targetUrl: String
-    ) {
-        var hasUserAgent = false
-        var hasReferer = false
-        var hasCookie = false
-
-        headers.forEach { (k, v) ->
-            if (k.isNotBlank() && v.isNotBlank()) {
-                try {
-                    builder.header(k, v)
-                    if (k.equals("User-Agent", ignoreCase = true)) hasUserAgent = true
-                    if (k.equals("Referer", ignoreCase = true)) hasReferer = true
-                    if (k.equals("Cookie", ignoreCase = true)) hasCookie = true
-                } catch (_: Exception) {}
-            }
-        }
-
-        if (!hasUserAgent) {
-            builder.header(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-            )
-        }
-
-        if (!hasCookie && targetUrl.isNotBlank()) {
-            try {
-                val cookie = android.webkit.CookieManager.getInstance().getCookie(targetUrl)
-                if (!cookie.isNullOrBlank()) {
-                    builder.header("Cookie", cookie)
-                }
-            } catch (_: Exception) {}
-        }
-
-        if (!hasReferer && targetUrl.isNotBlank()) {
-            try {
-                val uri = android.net.Uri.parse(targetUrl)
-                if (uri.scheme != null && uri.host != null) {
-                    builder.header("Referer", "${uri.scheme}://${uri.host}/")
-                }
-            } catch (_: Exception) {}
-        }
-    }
-
     private fun fetchText(url: String, headers: Map<String, String>): String {
         val requestBuilder = Request.Builder().url(url).get()
-        applyBrowserContextHeaders(requestBuilder, headers, url)
+        headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
         val response = okHttpClient.newCall(requestBuilder.build()).execute()
         if (!response.isSuccessful) {
             throw java.io.IOException("Failed to fetch HLS manifest (${response.code})")
@@ -256,7 +210,7 @@ class HlsSegmentDownloader(
         outputStream: FileOutputStream
     ): Long {
         val requestBuilder = Request.Builder().url(segmentUrl).get()
-        applyBrowserContextHeaders(requestBuilder, headers, segmentUrl)
+        headers.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
 
         val response = okHttpClient.newCall(requestBuilder.build()).execute()
         if (!response.isSuccessful) {
@@ -290,45 +244,17 @@ class HlsSegmentDownloader(
         }
     }
 
-    private fun parseHeaders(headersJson: String?, url: String? = null): Map<String, String> {
+    private fun parseHeaders(headersJson: String?): Map<String, String> {
         val map = mutableMapOf<String, String>()
-        if (!headersJson.isNullOrBlank()) {
-            try {
-                val json = JSONObject(headersJson)
-                json.keys().forEach { key ->
-                    val v = json.optString(key)
-                    if (key.isNotBlank() && v.isNotBlank()) {
-                        map[key] = v
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse headers: ${e.message}")
+        if (headersJson.isNullOrBlank()) return map
+        try {
+            val json = JSONObject(headersJson)
+            json.keys().forEach { key ->
+                map[key] = json.optString(key)
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse headers: ${e.message}")
         }
-
-        if (!url.isNullOrBlank()) {
-            try {
-                if (!map.containsKey("Cookie") && !map.containsKey("cookie")) {
-                    val cookie = android.webkit.CookieManager.getInstance().getCookie(url)
-                    if (!cookie.isNullOrBlank()) {
-                        map["Cookie"] = cookie
-                    }
-                }
-            } catch (_: Exception) {}
-            try {
-                if (!map.containsKey("Referer") && !map.containsKey("referer")) {
-                    val uri = android.net.Uri.parse(url)
-                    if (uri.scheme != null && uri.host != null) {
-                        map["Referer"] = "${uri.scheme}://${uri.host}/"
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-
-        if (!map.containsKey("User-Agent") && !map.containsKey("user-agent")) {
-            map["User-Agent"] = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-        }
-
         return map
     }
 }

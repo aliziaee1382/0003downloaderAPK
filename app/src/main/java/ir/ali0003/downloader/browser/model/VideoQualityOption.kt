@@ -12,14 +12,16 @@ data class VideoQualityOption(
     val formatTag: String = "MP4",
     val formatId: String? = null,
     val isYoutubeDl: Boolean = false,
-    val renditionKey: String? = null
+    val renditionKey: String? = null,
+    val isExactSize: Boolean = false
 ) {
     val formattedSize: String
         get() {
             if (estimatedSizeBytes > 0L) {
-                return formatFileSize(estimatedSizeBytes)
+                val sizeStr = formatFileSize(estimatedSizeBytes)
+                return if (isExactSize) sizeStr else "~$sizeStr"
             }
-            return ""
+            return if (isHlsVariant) "Adaptive HLS" else ""
         }
 
     val formattedBandwidth: String
