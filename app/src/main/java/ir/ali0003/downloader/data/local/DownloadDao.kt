@@ -57,17 +57,17 @@ interface DownloadDao {
     @Query("UPDATE download_tasks SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: Long, status: DownloadStatus)
 
-    @Query("UPDATE download_tasks SET downloadedBytes = :downloadedBytes, totalBytes = :totalBytes, speedBps = :speedBps WHERE id = :id")
-    suspend fun updateProgress(id: Long, downloadedBytes: Long, totalBytes: Long, speedBps: Long)
+    @Query("UPDATE download_tasks SET downloadedBytes = :downloadedBytes, totalBytes = :totalBytes, speedBps = :speedBps, etaSeconds = :etaSeconds WHERE id = :id")
+    suspend fun updateProgress(id: Long, downloadedBytes: Long, totalBytes: Long, speedBps: Long, etaSeconds: Long = 0L)
 
     @Query("UPDATE download_tasks SET isHidden = :isHidden WHERE id = :id")
     suspend fun updateHiddenStatus(id: Long, isHidden: Boolean)
 
-    @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, downloadedBytes = totalBytes, speedBps = 0 WHERE id = :id")
+    @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, downloadedBytes = totalBytes, speedBps = 0, etaSeconds = 0 WHERE id = :id")
     suspend fun markCompleted(id: Long, completedAt: Long = System.currentTimeMillis())
 
-    @Query("UPDATE download_tasks SET status = 'FAILED', speedBps = 0 WHERE id = :id")
-    suspend fun markFailed(id: Long)
+    @Query("UPDATE download_tasks SET status = 'FAILED', speedBps = 0, etaSeconds = 0, errorMessage = :errorMessage WHERE id = :id")
+    suspend fun markFailed(id: Long, errorMessage: String? = null)
 
     @Query("SELECT COUNT(*) FROM download_tasks WHERE isHidden = 0")
     fun getPublicCount(): Flow<Int>

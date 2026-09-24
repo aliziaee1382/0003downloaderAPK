@@ -65,9 +65,11 @@ class ExampleRobolectricTest {
         assertEquals("test.mp4", item?.fileName)
         assertEquals(DownloadStatus.QUEUED, item?.status)
 
-        repository.updateProgress(id, 500L, 1000L, 100L)
+        repository.updateProgress(id, 500L, 1000L, 100L, 5L)
         val updated = repository.findDownloadById(id)
         assertEquals(500L, updated?.downloadedBytes)
+        assertEquals(5L, updated?.etaSeconds)
+        assertEquals("5s", updated?.formattedEta)
 
         val activeList = repository.activeDownloads.first()
         assertEquals(1, activeList.size)
@@ -78,6 +80,32 @@ class ExampleRobolectricTest {
 
         val vaultList = repository.vaultDownloads.first()
         assertEquals(1, vaultList.size)
+    }
+
+    @Test
+    fun `test download failure retains task record with error message`() = runBlocking {
+        val id = repository.enqueueDownload(
+            url = "https://cdn.example.com/failed.m3u8",
+            websiteUrl = "https://example.com",
+            fileName = "failed.mp4",
+            mimeType = "video/mp4",
+            totalBytes = 2000L,
+            isHidden = false
+        )
+
+        repository.markFailed(id, "Transient segment timeout: HTTP 504")
+
+        val failedTask = repository.findDownloadById(id)
+        assertNotNull(failedTask)
+        assertEquals(DownloadStatus.FAILED, failedTask?.status)
+        assertEquals("Transient segment timeout: HTTP 504", failedTask?.errorMessage)
+    }
+
+    @Test
+    fun `test Media3 download manager configuration`() {
+        val dm = ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getDownloadManager(context)
+        assertEquals(3, dm.maxParallelDownloads)
+        assertEquals(5, dm.minRetryCount)
     }
 
     @Test

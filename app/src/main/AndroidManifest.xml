@@ -20,6 +20,7 @@
         android:supportsRtl="false"
         android:hardwareAccelerated="true"
         android:largeHeap="true"
+        android:requestLegacyExternalStorage="true"
         android:theme="@style/Theme.MyApplication">
 
         <service

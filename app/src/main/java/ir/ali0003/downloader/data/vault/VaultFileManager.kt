@@ -40,6 +40,19 @@ class VaultFileManager(
 
     private val publicDownloadsDir: File
         get() {
+            val publicDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val appPublicDir = File(publicDir, "0003_Downloader")
+            return if (appPublicDir.exists() || appPublicDir.mkdirs()) {
+                appPublicDir
+            } else {
+                val dir = File(context.getExternalFilesDir(null), "downloads")
+                if (!dir.exists()) dir.mkdirs()
+                dir
+            }
+        }
+
+    private val externalFallbackDownloadsDir: File
+        get() {
             val dir = File(context.getExternalFilesDir(null), "downloads")
             if (!dir.exists()) dir.mkdirs()
             return dir
@@ -138,6 +151,8 @@ class VaultFileManager(
             File(vaultDir, sanitizedName),
             File(publicDownloadsDir, cleanName),
             File(publicDownloadsDir, sanitizedName),
+            File(externalFallbackDownloadsDir, cleanName),
+            File(externalFallbackDownloadsDir, sanitizedName),
             File(context.filesDir, "vault_media/$cleanName"),
             File(context.filesDir, "vault_media/$sanitizedName"),
             File(context.filesDir, "vault_media/$hiddenName"),

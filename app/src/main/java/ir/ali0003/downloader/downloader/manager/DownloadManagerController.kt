@@ -90,8 +90,12 @@ class DownloadManagerController(
             try {
                 downloadDao.updateStatus(task.id, DownloadStatus.DOWNLOADING)
 
+                val publicDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                val appPublicDir = File(publicDir, "0003_Downloader")
                 val destDir = if (task.isHidden) {
                     File(context.filesDir, "vault_media")
+                } else if (appPublicDir.exists() || appPublicDir.mkdirs()) {
+                    appPublicDir
                 } else {
                     File(context.getExternalFilesDir(null), "downloads")
                 }
@@ -110,10 +114,11 @@ class DownloadManagerController(
 
                     // Update Room at throttled cadence
                     downloadDao.updateProgress(
-                        task.id,
-                        progress.downloadedBytes,
-                        progress.totalBytes,
-                        progress.speedBps
+                        id = task.id,
+                        downloadedBytes = progress.downloadedBytes,
+                        totalBytes = progress.totalBytes,
+                        speedBps = progress.speedBps,
+                        etaSeconds = progress.etaSeconds
                     )
 
                     // Forward notification progress to foreground service
@@ -132,11 +137,15 @@ class DownloadManagerController(
                     if (progress.isCompleted) {
                         downloadDao.markCompleted(task.id, System.currentTimeMillis())
                         activeJobs.remove(task.id)
+                    } else if (progress.isFailed) {
+                        Log.e(TAG, "Task ${task.id} failed: ${progress.errorMessage}")
+                        downloadDao.markFailed(task.id, progress.errorMessage ?: "Download failed")
+                        activeJobs.remove(task.id)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Download error for task ${task.id}: ${e.message}", e)
-                downloadDao.markFailed(task.id)
+                downloadDao.markFailed(task.id, e.message ?: "Download failed")
                 activeJobs.remove(task.id)
             }
         }

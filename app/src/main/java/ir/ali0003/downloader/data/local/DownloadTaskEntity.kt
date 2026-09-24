@@ -31,6 +31,8 @@ data class DownloadTaskEntity(
     val isM3u8: Boolean = false,
     val headersJson: String = "{}",
     val isHidden: Boolean = false,
+    val etaSeconds: Long = 0L,
+    val errorMessage: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val completedAt: Long? = null
 ) {
@@ -52,6 +54,15 @@ data class DownloadTaskEntity(
     val formattedSpeed: String
         get() = if (status == DownloadStatus.DOWNLOADING && speedBps > 0) {
             "${formatFileSize(speedBps)}/s"
+        } else {
+            "--"
+        }
+
+    val formattedEta: String
+        get() = if (etaSeconds > 0L) {
+            val mins = etaSeconds / 60
+            val secs = etaSeconds % 60
+            if (mins > 0) "${mins}m ${secs}s" else "${secs}s"
         } else {
             "--"
         }

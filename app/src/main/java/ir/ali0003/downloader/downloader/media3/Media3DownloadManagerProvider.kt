@@ -139,7 +139,7 @@ object Media3DownloadManagerProvider {
                 downloadExecutor
             ).apply {
                 maxParallelDownloads = 3
-                minRetryCount = 3
+                minRetryCount = 5
             }.also {
                 downloadManager = it
             }

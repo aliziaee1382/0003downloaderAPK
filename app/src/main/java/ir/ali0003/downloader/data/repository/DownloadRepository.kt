@@ -32,12 +32,12 @@ interface DownloadRepository {
     suspend fun insertTask(task: DownloadTaskEntity): Long
     suspend fun insertTasks(tasks: List<DownloadTaskEntity>): List<Long>
     suspend fun updateTask(task: DownloadTaskEntity)
-    suspend fun updateProgress(id: Long, downloadedBytes: Long, totalBytes: Long, speedBps: Long)
+    suspend fun updateProgress(id: Long, downloadedBytes: Long, totalBytes: Long, speedBps: Long, etaSeconds: Long = 0L)
     suspend fun pauseDownload(id: Long)
     suspend fun resumeDownload(id: Long)
     suspend fun retryDownload(id: Long)
     suspend fun markCompleted(id: Long)
-    suspend fun markFailed(id: Long)
+    suspend fun markFailed(id: Long, errorMessage: String? = null)
     suspend fun setHidden(id: Long, isHidden: Boolean)
     suspend fun deleteDownload(id: Long)
     suspend fun deleteSeedTasks()
@@ -124,9 +124,10 @@ class DownloadRepositoryImpl(
         id: Long,
         downloadedBytes: Long,
         totalBytes: Long,
-        speedBps: Long
+        speedBps: Long,
+        etaSeconds: Long
     ) {
-        downloadDao.updateProgress(id, downloadedBytes, totalBytes, speedBps)
+        downloadDao.updateProgress(id, downloadedBytes, totalBytes, speedBps, etaSeconds)
     }
 
     override suspend fun pauseDownload(id: Long) {
@@ -145,8 +146,8 @@ class DownloadRepositoryImpl(
         downloadDao.markCompleted(id, System.currentTimeMillis())
     }
 
-    override suspend fun markFailed(id: Long) {
-        downloadDao.markFailed(id)
+    override suspend fun markFailed(id: Long, errorMessage: String?) {
+        downloadDao.markFailed(id, errorMessage)
     }
 
     override suspend fun setHidden(id: Long, isHidden: Boolean) {

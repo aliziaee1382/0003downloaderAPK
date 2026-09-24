@@ -300,4 +300,223 @@ class HardwareMediaMuxer(
             throw c
         }
     }
+
+    /**
+     * Remuxes a single input stream (MPEG-TS, MKV, WebM, or fragmented MP4) into a clean,
+     * standard standalone .mp4 container using hardware MediaMuxer direct stream copy.
+     */
+    suspend fun remuxSingleStreamToMp4(
+        inputFile: File,
+        outputFile: File,
+        onProgress: ((Float) -> Unit)? = null
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (!inputFile.exists() || inputFile.length() == 0L) {
+            Log.e(TAG, "Input file missing or empty for remux: ${inputFile.absolutePath}")
+            return@withContext false
+        }
+
+        outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) {
+            outputFile.delete()
+        }
+
+        Log.d(TAG, "Starting remuxSingleStreamToMp4: input=${inputFile.name} (${inputFile.length()} B)")
+
+        // 1. Fast path: Direct hardware sample remuxing using MediaExtractor and MediaMuxer
+        val fastSuccess = tryDirectSingleStreamRemux(inputFile, outputFile, onProgress)
+        if (fastSuccess && outputFile.exists() && outputFile.length() > 0L) {
+            Log.i(TAG, "Direct single stream hardware remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+            onProgress?.invoke(1.0f)
+            return@withContext true
+        }
+
+        // 2. Fallback path: Media3 Transformer single stream export
+        Log.i(TAG, "Attempting Media3 Transformer single stream remux...")
+        val media3Success = withContext(Dispatchers.Main) {
+            runMedia3TransformerSingle(inputFile, outputFile, onProgress)
+        }
+
+        if (media3Success && outputFile.exists() && outputFile.length() > 0L) {
+            Log.i(TAG, "Media3 Transformer single stream remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+            onProgress?.invoke(1.0f)
+            true
+        } else {
+            Log.w(TAG, "Hardware remux failed, attempting safe file copy if destination missing")
+            if (!outputFile.exists() || outputFile.length() == 0L) {
+                try {
+                    inputFile.copyTo(outputFile, overwrite = true)
+                    outputFile.exists() && outputFile.length() > 0L
+                } catch (e: Exception) {
+                    false
+                }
+            } else {
+                true
+            }
+        }
+    }
+
+    /**
+     * Direct sample copying from a single media container to MP4 using MediaExtractor and MediaMuxer.
+     */
+    private fun tryDirectSingleStreamRemux(
+        inputFile: File,
+        outputFile: File,
+        onProgress: ((Float) -> Unit)?
+    ): Boolean {
+        var extractor: MediaExtractor? = null
+        var muxer: MediaMuxer? = null
+
+        try {
+            if (outputFile.exists()) outputFile.delete()
+
+            extractor = MediaExtractor().apply { setDataSource(inputFile.absolutePath) }
+
+            var videoTrackIndex = -1
+            var audioTrackIndex = -1
+            var videoFormat: MediaFormat? = null
+            var audioFormat: MediaFormat? = null
+
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/") && videoTrackIndex == -1) {
+                    videoTrackIndex = i
+                    videoFormat = format
+                } else if (mime.startsWith("audio/") && audioTrackIndex == -1) {
+                    audioTrackIndex = i
+                    audioFormat = format
+                }
+            }
+
+            if (videoTrackIndex == -1 && audioTrackIndex == -1) {
+                Log.w(TAG, "Direct single remux: No audio or video tracks found in ${inputFile.name}")
+                return false
+            }
+
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val muxerTrackMap = mutableMapOf<Int, Int>()
+
+            if (videoTrackIndex != -1 && videoFormat != null) {
+                muxerTrackMap[videoTrackIndex] = muxer.addTrack(videoFormat)
+            }
+            if (audioTrackIndex != -1 && audioFormat != null) {
+                muxerTrackMap[audioTrackIndex] = muxer.addTrack(audioFormat)
+            }
+
+            muxer.start()
+
+            for (trackIdx in muxerTrackMap.keys) {
+                extractor.selectTrack(trackIdx)
+            }
+
+            val bufferSize = 1024 * 1024
+            val buffer = ByteBuffer.allocateDirect(bufferSize)
+            val bufferInfo = MediaCodec.BufferInfo()
+
+            val totalBytes = inputFile.length().coerceAtLeast(1L)
+            var bytesReadTotal = 0L
+
+            while (true) {
+                val sampleSize = extractor.readSampleData(buffer, 0)
+                if (sampleSize < 0) break
+
+                val sampleTrack = extractor.sampleTrackIndex
+                val muxerTrack = muxerTrackMap[sampleTrack]
+                if (muxerTrack != null) {
+                    bufferInfo.offset = 0
+                    bufferInfo.size = sampleSize
+                    bufferInfo.presentationTimeUs = extractor.sampleTime
+                    bufferInfo.flags = extractor.sampleFlags
+
+                    muxer.writeSampleData(muxerTrack, buffer, bufferInfo)
+                }
+
+                bytesReadTotal += sampleSize
+                onProgress?.invoke((bytesReadTotal.toFloat() / totalBytes).coerceIn(0f, 0.99f))
+                extractor.advance()
+            }
+
+            return true
+        } catch (e: Exception) {
+            Log.w(TAG, "tryDirectSingleStreamRemux failed: ${e.message}")
+            return false
+        } finally {
+            try {
+                extractor?.release()
+                muxer?.stop()
+                muxer?.release()
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Media3 Transformer pipeline for remuxing a single stream into MP4.
+     */
+    private suspend fun runMedia3TransformerSingle(
+        inputFile: File,
+        outputFile: File,
+        onProgress: ((Float) -> Unit)?
+    ): Boolean {
+        val completionDeferred = CompletableDeferred<Boolean>()
+
+        val item = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(inputFile)))
+            .build()
+        val sequence = EditedMediaItemSequence(listOf(item))
+        val composition = Composition.Builder(listOf(sequence)).build()
+
+        val listener = object : Transformer.Listener {
+            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                if (!completionDeferred.isCompleted) {
+                    completionDeferred.complete(true)
+                }
+            }
+
+            override fun onError(
+                composition: Composition,
+                exportResult: ExportResult,
+                exportException: ExportException
+            ) {
+                Log.w(TAG, "Media3 Transformer single stream error: ${exportException.message}")
+                if (!completionDeferred.isCompleted) {
+                    completionDeferred.complete(false)
+                }
+            }
+        }
+
+        val transformer = Transformer.Builder(context)
+            .addListener(listener)
+            .build()
+
+        try {
+            transformer.start(composition, outputFile.absolutePath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start Media3 Transformer single stream", e)
+            return false
+        }
+
+        var progressActive = true
+        val progressJob = kotlinx.coroutines.GlobalScope.launch(Dispatchers.Main) {
+            val progressHolder = ProgressHolder()
+            while (progressActive && !completionDeferred.isCompleted) {
+                val state = transformer.getProgress(progressHolder)
+                if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                    val progressFraction = (progressHolder.progress / 100f).coerceIn(0f, 1f)
+                    onProgress?.invoke(progressFraction)
+                }
+                delay(150)
+            }
+        }
+
+        return try {
+            val result = completionDeferred.await()
+            progressActive = false
+            progressJob.cancel()
+            result && outputFile.exists() && outputFile.length() > 0L
+        } catch (c: CancellationException) {
+            progressActive = false
+            progressJob.cancel()
+            transformer.cancel()
+            throw c
+        }
+    }
 }
