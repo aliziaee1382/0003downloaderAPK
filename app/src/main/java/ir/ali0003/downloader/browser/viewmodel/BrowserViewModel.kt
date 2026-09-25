@@ -312,8 +312,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             val isM3u8 = mediaItem.isM3u8 || selectedQuality?.isHlsVariant == true
             val isAudio = selectedQuality?.formatTag?.contains("AUDIO", ignoreCase = true) == true ||
                     selectedQuality?.resolution?.contains("Audio", ignoreCase = true) == true
-            // Do NOT use fake deterministic file sizes for HLS; keep 0L until segments are counted
-            val totalBytes = if (isM3u8) 0L else (selectedQuality?.estimatedSizeBytes ?: mediaItem.fileSizeBytes)
+            // Determine totalBytes ONCE before download begins:
+            // fixedTotalBytes = (averageBitrateBps * durationSeconds) / 8L
+            // If bitrate/duration is unavailable, keep totalBytes = 0L
+            val bitrateBps = selectedQuality?.bandwidthBps ?: 0L
+            val durationSec = mediaItem.durationSeconds
+            val totalBytes = if (isM3u8) {
+                if (bitrateBps > 0L && durationSec > 0.0) {
+                    ((bitrateBps * durationSec) / 8.0).toLong()
+                } else {
+                    0L
+                }
+            } else {
+                selectedQuality?.estimatedSizeBytes ?: mediaItem.fileSizeBytes
+            }
             val fileName = if (selectedQuality != null) {
                 var base = mediaItem.cleanFileName.substringBeforeLast('.')
                 if (base.endsWith(".m3u8", ignoreCase = true)) {
@@ -379,6 +391,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
             if (mediaItem.pageUrl.isNotBlank()) {
                 headersObj.put("webpageUrl", mediaItem.pageUrl)
+            }
+            if (mediaItem.durationSeconds > 0.0) {
+                headersObj.put("duration_seconds", mediaItem.durationSeconds)
             }
             if (selectedQuality != null) {
                 if (!selectedQuality.renditionKey.isNullOrBlank()) {

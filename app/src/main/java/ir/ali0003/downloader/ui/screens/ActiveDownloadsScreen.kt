@@ -248,8 +248,16 @@ fun ActiveDownloadTaskCard(
                 // Size, Speed & ETA
                 Column {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val sizeText = if (totalBytes > 0L) {
+                            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ${DownloadTaskEntity.formatFileSize(totalBytes)}"
+                        } else if (liveProgress != null && liveProgress.totalSegments > 0) {
+                            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} (Segment ${liveProgress.currentSegment}/${liveProgress.totalSegments})"
+                        } else {
+                            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ..."
+                        }
+
                         Text(
-                            text = "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ${if (totalBytes > 0) DownloadTaskEntity.formatFileSize(totalBytes) else "..."}",
+                            text = sizeText,
                             color = GlassTheme.colors.textSecondary,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium

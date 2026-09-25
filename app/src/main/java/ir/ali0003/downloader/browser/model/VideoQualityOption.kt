@@ -17,11 +17,11 @@ data class VideoQualityOption(
 ) {
     val formattedSize: String
         get() {
-            if (!isHlsVariant && estimatedSizeBytes > 0L) {
+            if (estimatedSizeBytes > 0L) {
                 val sizeStr = formatFileSize(estimatedSizeBytes)
                 return if (isExactSize) sizeStr else "~$sizeStr"
             }
-            return if (isHlsVariant) "Adaptive Stream" else ""
+            return if (isHlsVariant) "Adaptive HLS" else ""
         }
 
     val formattedBandwidth: String
@@ -69,7 +69,8 @@ data class VideoQualityOption(
                     bandwidthBps >= 3_500_000L -> "1080p FHD"
                     bandwidthBps in 1_600_000L..3_499_999L -> "720p HD"
                     bandwidthBps in 750_000L..1_599_999L -> "480p SD"
-                    else -> "360p SD"
+                    bandwidthBps in 400_000L..749_999L -> "360p SD"
+                    else -> "240p"
                 }
             }
 
@@ -113,7 +114,8 @@ data class VideoQualityOption(
             bandwidthBps >= 3_500_000L -> 1080
             bandwidthBps in 1_600_000L..3_499_999L -> 720
             bandwidthBps in 750_000L..1_599_999L -> 480
-            bandwidthBps > 0L -> 360
+            bandwidthBps in 400_000L..749_999L -> 360
+            bandwidthBps > 0L -> 240
             else -> 0
         }
     }

@@ -131,7 +131,11 @@ class DownloadManagerController(
                         progressPercent = percent,
                         speedText = speedText,
                         etaText = etaText,
-                        taskId = task.id
+                        taskId = task.id,
+                        downloadedBytes = progress.downloadedBytes,
+                        totalBytes = progress.totalBytes,
+                        currentSegment = progress.currentSegment,
+                        totalSegments = progress.totalSegments
                     )
 
                     if (progress.isCompleted) {

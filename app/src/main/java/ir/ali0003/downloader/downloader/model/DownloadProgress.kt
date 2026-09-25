@@ -9,10 +9,14 @@ data class DownloadProgress(
     val isCompleted: Boolean = false,
     val isFailed: Boolean = false,
     val errorMessage: String? = null,
-    val explicitProgress: Float? = null
+    val explicitProgress: Float? = null,
+    val currentSegment: Int = 0,
+    val totalSegments: Int = 0
 ) {
     val progress: Float
-        get() = explicitProgress ?: if (totalBytes > 0L) {
+        get() = explicitProgress ?: if (totalSegments > 0) {
+            (currentSegment.toFloat() / totalSegments.toFloat()).coerceIn(0f, 1f)
+        } else if (totalBytes > 0L) {
             (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
         } else if (isCompleted) {
             1.0f

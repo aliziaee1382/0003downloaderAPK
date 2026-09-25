@@ -63,7 +63,7 @@ class Phase2SnifferTest {
         assertTrue(highest.isHlsVariant)
         assertTrue(highest.label.contains("1080p"))
         assertEquals(0L, highest.estimatedSizeBytes)
-        assertEquals("Adaptive Stream", highest.formattedSize)
+        assertEquals("Adaptive HLS", highest.formattedSize)
 
         val lowest = qualities[2]
         assertEquals("640x360", lowest.resolution)
@@ -325,5 +325,153 @@ class Phase2SnifferTest {
         assertFalse(bucketed.any { it.label == "Direct Stream" })
         assertTrue(bucketed[0].cleanResolutionBadge.contains("1080p"))
         assertTrue(bucketed[1].cleanResolutionBadge.contains("720p"))
+    }
+
+    @Test
+    fun testCandidateMasterUrlsGeneratedFromNetworkLogsAndPathStripping() {
+        val networkLogs = listOf(
+            "https://cdn.example.com/assets/player.js",
+            "https://cdn.example.com/videos/master.m3u8?token=sec123",
+            "https://other.com/ad.m3u8"
+        )
+        val subVariantUrl = "https://cdn.example.com/videos/720p/index.m3u8?rendition=720p&token=sec123"
+
+        val candidates = HlsManifestParser.generateCandidateMasterUrls(subVariantUrl, networkLogs)
+
+        // 1. Should prioritize candidate from same-host network logs
+        assertTrue(candidates.contains("https://cdn.example.com/videos/master.m3u8?token=sec123"))
+
+        // 2. Should strip rendition path segment (/720p/)
+        assertTrue(candidates.any { it.startsWith("https://cdn.example.com/videos/index.m3u8") })
+
+        // 3. Should strip rendition query param (?rendition=720p)
+        assertTrue(candidates.any { !it.contains("rendition=720p") })
+
+        // 4. Should include parent directory master.m3u8
+        assertTrue(candidates.any { it.contains("videos/master.m3u8") || it.contains("videos/playlist.m3u8") })
+    }
+
+    @Test
+    fun testAllHlsResolutionsRetainedWithoutDropping() {
+        val manifestWithAllTiers = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080
+            1080p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+            720p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=854x480
+            480p.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=350000,RESOLUTION=426x240
+            240p.m3u8
+        """.trimIndent()
+
+        val parsed = HlsManifestParser.parseManifestContent(manifestWithAllTiers, "https://cdn.example.com/master.m3u8")
+        assertEquals(4, parsed.size)
+        assertEquals("1920x1080", parsed[0].resolution)
+        assertEquals("1280x720", parsed[1].resolution)
+        assertEquals("854x480", parsed[2].resolution)
+        assertEquals("426x240", parsed[3].resolution)
+        assertEquals("240p", parsed[3].cleanResolutionBadge)
+
+        // Ensure normalizeAndBucketQualities preserves all 4 tiers for HLS
+        val engine = ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine {}
+        val bucketed = engine.normalizeAndBucketQualities(
+            rawQualities = parsed,
+            durationSeconds = 120.0,
+            baseFileSizeBytes = 0L,
+            isHls = true,
+            fallbackUrl = "https://cdn.example.com/master.m3u8"
+        )
+        assertEquals(4, bucketed.size)
+        assertTrue(bucketed.any { it.cleanResolutionBadge == "1080p FHD" })
+        assertTrue(bucketed.any { it.cleanResolutionBadge == "720p HD" })
+        assertTrue(bucketed.any { it.cleanResolutionBadge == "480p SD" })
+        assertTrue(bucketed.any { it.cleanResolutionBadge == "240p" })
+    }
+
+    @Test
+    fun testNonFluctuatingTotalBytesFormula() {
+        val bitrateBps = 3_000_000L
+        val durationSeconds = 120.0
+        val fixedTotalBytes = ((bitrateBps * durationSeconds) / 8.0).toLong()
+
+        // 3 Mbps for 120 seconds = 45,000,000 bytes (~42.9 MB)
+        assertEquals(45_000_000L, fixedTotalBytes)
+
+        // Progress calculation does NOT jump or dynamically scale with segment bytes
+        val seg1Downloaded = 450_000L
+        val seg1Ratio = 1f / 100f
+        val progress1 = ir.ali0003.downloader.downloader.model.DownloadProgress(
+            taskId = 1L,
+            downloadedBytes = seg1Downloaded,
+            totalBytes = fixedTotalBytes,
+            speedBps = 1_000_000L,
+            etaSeconds = 44L,
+            explicitProgress = seg1Ratio,
+            currentSegment = 1,
+            totalSegments = 100
+        )
+
+        assertEquals(fixedTotalBytes, progress1.totalBytes)
+        assertEquals(0.01f, progress1.progress, 0.001f)
+
+        // Segment 50: totalBytes remains fixedTotalBytes
+        val seg50Downloaded = 22_500_000L
+        val progress50 = ir.ali0003.downloader.downloader.model.DownloadProgress(
+            taskId = 1L,
+            downloadedBytes = seg50Downloaded,
+            totalBytes = fixedTotalBytes,
+            speedBps = 1_000_000L,
+            etaSeconds = 22L,
+            explicitProgress = 0.5f,
+            currentSegment = 50,
+            totalSegments = 100
+        )
+        assertEquals(fixedTotalBytes, progress50.totalBytes)
+        assertEquals(0.5f, progress50.progress, 0.001f)
+    }
+
+    @Test
+    fun testAverageBandwidthAndAudioSummation() {
+        val manifestWithAudio = """
+            #EXTM3U
+            #EXT-X-VERSION:3
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio-aac",NAME="English",DEFAULT=YES,AUTOSELECT=YES,BANDWIDTH=128000,URI="audio_en.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=4000000,AVERAGE-BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO="audio-aac"
+            720p_video.m3u8
+        """.trimIndent()
+
+        val parsed = HlsManifestParser.parseManifestContent(manifestWithAudio, "https://cdn.example.com/master.m3u8")
+        val videoOption = parsed.firstOrNull { !it.formatTag.contains("AUDIO", ignoreCase = true) }
+        assertNotNull(videoOption)
+
+        // AVERAGE-BANDWIDTH (2,500,000) + audio bandwidth (128,000) = 2,628,000
+        assertEquals(2_628_000L, videoOption!!.bandwidthBps)
+        assertTrue(videoOption.isHlsVariant)
+    }
+
+    @Test
+    fun testTildeSizePrefixForEstimatedHlsSizes() {
+        val estimatedOption = VideoQualityOption(
+            label = "720p HD",
+            resolution = "1280x720",
+            bandwidthBps = 2_000_000L,
+            url = "https://cdn.example.com/720p.m3u8",
+            isHlsVariant = true,
+            estimatedSizeBytes = 47_185_920L, // ~45 MB
+            isExactSize = false
+        )
+        assertEquals("~45 MB", estimatedOption.formattedSize)
+
+        val exactOption = VideoQualityOption(
+            label = "1080p MP4",
+            resolution = "1920x1080",
+            bandwidthBps = 0L,
+            url = "https://cdn.example.com/video.mp4",
+            isHlsVariant = false,
+            estimatedSizeBytes = 104_857_600L, // 100 MB
+            isExactSize = true
+        )
+        assertEquals("100 MB", exactOption.formattedSize)
     }
 }

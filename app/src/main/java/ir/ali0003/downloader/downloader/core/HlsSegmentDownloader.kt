@@ -65,8 +65,19 @@ class HlsSegmentDownloader(
 
         Log.d(TAG, "Starting HLS download for Task $taskId from: $manifestUrl (dest: ${outputFile.absolutePath})")
 
+        val targetBitrate = headers["target_bitrate"]?.toLongOrNull() ?: 0L
+        val durationSec = headers["duration_seconds"]?.toDoubleOrNull() ?: 0.0
+        val fixedTotalBytes = if (task.totalBytes > 0L) {
+            task.totalBytes
+        } else if (targetBitrate > 0L && durationSec > 0.0) {
+            ((targetBitrate * durationSec) / 8.0).toLong()
+        } else {
+            0L
+        }
+
         var totalDownloadedBytes = 0L
         var totalSegments = 0
+        var downloadedSegments = 0
 
         try {
             // 1. Fetch Playlist and resolve target media segments
@@ -78,7 +89,7 @@ class HlsSegmentDownloader(
             }
 
             totalSegments = segmentUrls.size
-            Log.d(TAG, "Task $taskId: parsed $totalSegments media segments from $resolvedPlaylistUrl")
+            Log.d(TAG, "Task $taskId: parsed $totalSegments media segments from $resolvedPlaylistUrl (fixedTotalBytes: $fixedTotalBytes)")
 
             // Ensure destination directory exists
             outputFile.parentFile?.mkdirs()
@@ -92,7 +103,6 @@ class HlsSegmentDownloader(
             }
             if (workingFile.exists()) workingFile.delete()
 
-            var downloadedSegments = 0
             var lastEmitTime = 0L
             var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
@@ -133,16 +143,26 @@ class HlsSegmentDownloader(
 
                     val now = System.currentTimeMillis()
                     val linearProgress = (downloadedSegments.toFloat() / totalSegments.toFloat()).coerceIn(0f, 1f)
-                    val avgBytesPerSegment = (totalDownloadedBytes / downloadedSegments).coerceAtLeast(1L)
-                    val estimatedTotal = (totalSegments * avgBytesPerSegment).coerceAtLeast(totalDownloadedBytes)
 
                     val timeDelta = (now - lastTime).coerceAtLeast(1L)
                     val bytesDelta = (totalDownloadedBytes - lastBytes).coerceAtLeast(0L)
                     val speedBps = (bytesDelta * 1000L) / timeDelta
                     val remainingSegments = (totalSegments - downloadedSegments).coerceAtLeast(0)
-                    val etaSeconds = if (speedBps > 0) (remainingSegments * avgBytesPerSegment) / speedBps else 0L
+                    val etaSeconds = if (speedBps > 0 && remainingSegments > 0) {
+                        if (fixedTotalBytes > totalDownloadedBytes) {
+                            (fixedTotalBytes - totalDownloadedBytes) / speedBps
+                        } else if (downloadedSegments > 0) {
+                            val avgBytes = totalDownloadedBytes / downloadedSegments
+                            (remainingSegments * avgBytes) / speedBps
+                        } else {
+                            0L
+                        }
+                    } else {
+                        0L
+                    }
 
                     // Emit live updates every 300-500ms and on final segment
+                    // Maintain fixed rock-solid totalBytes: NEVER recalculate dynamically inside download loop
                     if (now - lastEmitTime >= 350L || downloadedSegments == totalSegments) {
                         lastEmitTime = now
                         lastTime = now
@@ -152,10 +172,12 @@ class HlsSegmentDownloader(
                             DownloadProgress(
                                 taskId = taskId,
                                 downloadedBytes = totalDownloadedBytes,
-                                totalBytes = estimatedTotal,
+                                totalBytes = fixedTotalBytes,
                                 speedBps = speedBps,
                                 etaSeconds = etaSeconds,
-                                explicitProgress = linearProgress
+                                explicitProgress = linearProgress,
+                                currentSegment = downloadedSegments,
+                                totalSegments = totalSegments
                             )
                         )
                     }
@@ -216,7 +238,9 @@ class HlsSegmentDownloader(
                     speedBps = 0L,
                     etaSeconds = 0L,
                     isCompleted = true,
-                    explicitProgress = 1.0f
+                    explicitProgress = 1.0f,
+                    currentSegment = totalSegments,
+                    totalSegments = totalSegments
                 )
             )
 
@@ -226,11 +250,14 @@ class HlsSegmentDownloader(
                 DownloadProgress(
                     taskId = taskId,
                     downloadedBytes = totalDownloadedBytes,
-                    totalBytes = if (totalSegments > 0) totalSegments * 1024L * 1024L else 0L,
+                    totalBytes = fixedTotalBytes,
                     speedBps = 0L,
                     etaSeconds = 0L,
                     isFailed = true,
-                    errorMessage = e.message ?: "HLS download failed"
+                    errorMessage = e.message ?: "HLS download failed",
+                    explicitProgress = if (totalSegments > 0) (downloadedSegments.toFloat() / totalSegments.toFloat()) else 0f,
+                    currentSegment = downloadedSegments,
+                    totalSegments = totalSegments
                 )
             )
         }

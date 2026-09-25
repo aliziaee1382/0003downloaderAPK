@@ -203,10 +203,10 @@ class AppDownloadService : DownloadService(
                         lastDownloadStats[taskId] = Pair(bytesDownloaded, now)
 
                         val taskEntity = database.downloadDao().findDownloadById(taskId)
-                        val totalBytes = if (download.contentLength > 0) {
-                            download.contentLength
-                        } else if (taskEntity != null && taskEntity.totalBytes > 0) {
+                        val totalBytes = if (taskEntity != null && taskEntity.totalBytes > 0L) {
                             taskEntity.totalBytes
+                        } else if (download.contentLength > 0L) {
+                            download.contentLength
                         } else {
                             0L
                         }

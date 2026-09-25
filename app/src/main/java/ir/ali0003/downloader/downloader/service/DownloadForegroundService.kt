@@ -55,14 +55,22 @@ class DownloadForegroundService : Service() {
             progressPercent: Int,
             speedText: String,
             etaText: String,
-            taskId: Long
+            taskId: Long,
+            downloadedBytes: Long = 0L,
+            totalBytes: Long = 0L,
+            currentSegment: Int = 0,
+            totalSegments: Int = 0
         ) {
             activeInstance?.updateDownloadProgress(
                 taskName = taskName,
                 progressPercent = progressPercent,
                 speedText = speedText,
                 etaText = etaText,
-                taskId = taskId
+                taskId = taskId,
+                downloadedBytes = downloadedBytes,
+                totalBytes = totalBytes,
+                currentSegment = currentSegment,
+                totalSegments = totalSegments
             )
         }
 
@@ -143,7 +151,11 @@ class DownloadForegroundService : Service() {
         progressPercent: Int,
         speedText: String,
         etaText: String,
-        taskId: Long
+        taskId: Long,
+        downloadedBytes: Long = 0L,
+        totalBytes: Long = 0L,
+        currentSegment: Int = 0,
+        totalSegments: Int = 0
     ) {
         val now = System.currentTimeMillis()
         if (now - lastNotificationUpdateTime < 500L && progressPercent < 100) {
@@ -151,7 +163,22 @@ class DownloadForegroundService : Service() {
         }
         lastNotificationUpdateTime = now
 
-        val content = if (speedText.isNotEmpty()) "$progressPercent% • $speedText • ETA: $etaText" else "$progressPercent%"
+        val sizeInfo = if (totalBytes > 0L) {
+            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ${DownloadTaskEntity.formatFileSize(totalBytes)} ($progressPercent%)"
+        } else if (totalSegments > 0) {
+            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} (Segment $currentSegment/$totalSegments)"
+        } else if (downloadedBytes > 0L) {
+            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} ($progressPercent%)"
+        } else {
+            "$progressPercent%"
+        }
+
+        val content = buildString {
+            append(sizeInfo)
+            if (speedText.isNotEmpty()) append(" • $speedText")
+            if (etaText.isNotEmpty() && etaText != "--") append(" • ETA: $etaText")
+        }
+
         val notification = buildNotification(
             title = taskName,
             content = content,

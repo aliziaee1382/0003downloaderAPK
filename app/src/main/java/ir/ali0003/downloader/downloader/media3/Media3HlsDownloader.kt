@@ -49,7 +49,20 @@ class Media3HlsDownloader(
         val headers = parseHeaders(task.headersJson, manifestUrl)
         Media3DownloadManagerProvider.registerRequestHeaders(manifestUrl, headers)
 
-        Log.d(TAG, "Dispatching Media3 HLS download for task $taskId ($manifestUrl)")
+        // Determine totalBytes ONCE before download begins:
+        // fixedTotalBytes = (averageBitrateBps * durationSeconds) / 8L
+        // If bitrate/duration is unavailable, keep totalBytes = 0L
+        val targetBitrate = headers["target_bitrate"]?.toLongOrNull() ?: 0L
+        val durationSec = headers["duration_seconds"]?.toDoubleOrNull() ?: 0.0
+        val fixedTotalBytes = if (task.totalBytes > 0L) {
+            task.totalBytes
+        } else if (targetBitrate > 0L && durationSec > 0.0) {
+            ((targetBitrate * durationSec) / 8.0).toLong()
+        } else {
+            0L
+        }
+
+        Log.d(TAG, "Dispatching Media3 HLS download for task $taskId ($manifestUrl, fixedTotalBytes: $fixedTotalBytes)")
 
         // 1. Build and dispatch Media3 DownloadRequest
         launch {
@@ -116,7 +129,7 @@ class Media3HlsDownloader(
 
                 val state = download.state
                 val downloadedBytes = download.bytesDownloaded
-                val totalBytes = if (download.contentLength > 0) download.contentLength else task.totalBytes
+                val totalBytes = if (fixedTotalBytes > 0L) fixedTotalBytes else if (download.contentLength > 0L) download.contentLength else 0L
                 val percent = download.percentDownloaded
 
                 val now = System.currentTimeMillis()
@@ -233,7 +246,7 @@ class Media3HlsDownloader(
                     val download = downloadManager.downloadIndex.getDownload(downloadId)
                     if (download != null && download.state == Download.STATE_DOWNLOADING) {
                         val downloaded = download.bytesDownloaded
-                        val total = if (download.contentLength > 0) download.contentLength else task.totalBytes
+                        val total = if (fixedTotalBytes > 0L) fixedTotalBytes else if (download.contentLength > 0L) download.contentLength else 0L
                         val now = System.currentTimeMillis()
                         val dt = (now - lastTime).coerceAtLeast(1)
                         val db = (downloaded - lastDownloadedBytes).coerceAtLeast(0)

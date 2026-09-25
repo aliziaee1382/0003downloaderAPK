@@ -201,8 +201,9 @@ fun InAppVideoPlayerSheet(
                 .setUri(Uri.parse(task.url))
                 .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
                 .build()
-        } else if (isLocalProgressiveFile && targetFile != null) {
-            val fileNameLower = targetFile.name.lowercase()
+        } else if (isLocalProgressiveFile) {
+            val validFile = targetFile!!
+            val fileNameLower = validFile.name.lowercase()
             val mimeType = when {
                 fileNameLower.endsWith(".webm") -> androidx.media3.common.MimeTypes.VIDEO_WEBM
                 fileNameLower.endsWith(".mkv") -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
@@ -212,7 +213,7 @@ fun InAppVideoPlayerSheet(
                 else -> androidx.media3.common.MimeTypes.VIDEO_MP4
             }
             MediaItem.Builder()
-                .setUri(Uri.fromFile(targetFile))
+                .setUri(Uri.fromFile(validFile))
                 .setMimeType(mimeType)
                 .build()
         } else {

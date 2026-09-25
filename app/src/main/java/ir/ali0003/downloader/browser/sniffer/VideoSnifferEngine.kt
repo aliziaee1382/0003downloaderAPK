@@ -32,6 +32,9 @@ class VideoSnifferEngine(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
     private val detectedUrls = ConcurrentHashMap.newKeySet<String>()
+    private val recentNetworkUrls = java.util.concurrent.ConcurrentLinkedDeque<String>()
+
+    fun getRecentNetworkLogs(): List<String> = recentNetworkUrls.toList()
 
     // Canonical Aggregator State
     private val aggregationLock = Any()
@@ -51,6 +54,7 @@ class VideoSnifferEngine(
 
     fun resetSession() {
         detectedUrls.clear()
+        recentNetworkUrls.clear()
         synchronized(aggregationLock) {
             canonicalVideoItem = null
             accumulatedRawQualities.clear()
@@ -119,6 +123,12 @@ class VideoSnifferEngine(
         if (AdBlockEngine.isAdUrl(url) || isAdOrJunkUrl(url)) {
             return WebResourceResponse("text/plain", "UTF-8", null)
         }
+
+        // Record non-ad requests in rolling network log for parent manifest traversal
+        if (recentNetworkUrls.size >= 250) {
+            recentNetworkUrls.pollFirst()
+        }
+        recentNetworkUrls.addLast(url)
 
         // 2. Check if URL matches media patterns
         val requestHeaders = request.requestHeaders ?: emptyMap()
@@ -307,39 +317,44 @@ class VideoSnifferEngine(
             var finalDuration = durationSeconds
 
             if (isM3u8) {
-                // Primary: AndroidX Media3 DownloadHelper for genuine track groups and bitrates
-                val media3Result = if (appContext != null) {
-                    ir.ali0003.downloader.downloader.media3.Media3HlsHelper.extractHlsTracks(
-                        context = appContext!!,
-                        manifestUrl = mediaUrl,
-                        headers = fullHeaders,
-                        fallbackDurationSeconds = durationSeconds
-                    )
-                } else {
-                    null
+                // 1. Master Playlist Priority & Parent Traversal:
+                // When an .m3u8 URL is intercepted, inspect its contents:
+                // - If valid Master Playlist (#EXT-X-STREAM-INF), parse ALL variant streams (1080p, 720p, 480p, 240p).
+                // - If single-rendition sub-playlist without #EXT-X-STREAM-INF, do NOT settle for single-tier detection.
+                //   Strip rendition-specific URL path segments/parameters or query browser network logs to fetch the parent Master Manifest.
+                val hlsResult = HlsManifestParser.fetchAndParseMasterPlaylist(
+                    masterUrl = mediaUrl,
+                    headersMap = fullHeaders,
+                    fallbackDurationSeconds = durationSeconds,
+                    networkLogs = getRecentNetworkLogs()
+                )
+
+                if (hlsResult.parsedDurationSeconds > 0.0) {
+                    finalDuration = hlsResult.parsedDurationSeconds
                 }
 
-                if (media3Result != null && media3Result.qualities.isNotEmpty()) {
-                    qualities = media3Result.qualities
-                    if (media3Result.durationSeconds > 0.0) {
-                        finalDuration = media3Result.durationSeconds
-                    }
+                if (hlsResult.qualities.isNotEmpty()) {
+                    qualities = hlsResult.qualities
                 } else {
-                    // Fallback to HlsManifestParser
-                    val hlsResult = HlsManifestParser.fetchAndParseMasterPlaylist(
-                        masterUrl = mediaUrl,
-                        headersMap = fullHeaders,
-                        fallbackDurationSeconds = durationSeconds
-                    )
-
-                    if (hlsResult.parsedDurationSeconds > 0.0) {
-                        finalDuration = hlsResult.parsedDurationSeconds
+                    // Fallback: AndroidX Media3 DownloadHelper if HlsManifestParser yielded no tracks
+                    val media3Result = if (appContext != null) {
+                        ir.ali0003.downloader.downloader.media3.Media3HlsHelper.extractHlsTracks(
+                            context = appContext!!,
+                            manifestUrl = mediaUrl,
+                            headers = fullHeaders,
+                            fallbackDurationSeconds = durationSeconds
+                        )
+                    } else {
+                        null
                     }
 
-                    qualities = if (hlsResult.qualities.isNotEmpty()) {
-                        hlsResult.qualities
+                    if (media3Result != null && media3Result.qualities.isNotEmpty()) {
+                        qualities = media3Result.qualities
+                        if (media3Result.durationSeconds > 0.0) {
+                            finalDuration = media3Result.durationSeconds
+                        }
                     } else {
-                        listOf(
+                        qualities = listOf(
                             VideoQualityOption(
                                 label = "Direct Stream",
                                 resolution = "",
@@ -777,16 +792,21 @@ class VideoSnifferEngine(
             )
         }
 
-        // 1. Strict Deduplication by clean URL
-        val urlDeduplicated = rawQualities
+        // 1. Strict Deduplication:
+        // For HLS variants: preserve EVERY declared variant (distinct by resolution, bandwidth, clean badge, and URL/renditionKey)
+        // For progressive MP4: deduplicate by clean URL
+        val hlsVariants = rawQualities.filter { it.isHlsVariant }.distinctBy {
+            "${it.resolution}_${it.bandwidthBps}_${it.cleanResolutionBadge}_${it.renditionKey ?: it.url}"
+        }
+        val nonHlsVariants = rawQualities.filterNot { it.isHlsVariant }
             .groupBy { it.url.substringBefore('?').substringBefore('#') }
             .mapNotNull { (_, optionsForUrl) ->
                 optionsForUrl.maxWithOrNull(
-                    compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
-                        .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                    compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
                         .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
                 )
             }
+        val urlDeduplicated = hlsVariants + nonHlsVariants
 
         // 2. Filter Out Micro-Clips & Thumbnail Previews (Never filter out HLS variants based on megabytes)
         val hasFullVideo = urlDeduplicated.any { opt ->
@@ -851,17 +871,31 @@ class VideoSnifferEngine(
             it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
         }
 
-        // 5. Group streams by their distinct resolution height (e.g., 1080, 720, 480, 360)
-        // and keep the highest-bandwidth stream for each tier.
-        val distinctVideoTiers = videoOptions
-            .groupBy { it.getResolutionHeight() }
-            .mapNotNull { (_, optionsInTier) ->
-                optionsInTier.maxWithOrNull(
-                    compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
-                        .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
-                )
-            }
+        // 5. Video Tiers:
+        // For HLS streams: retain all declared video tiers (1080p, 720p, 480p, 240p)
+        // For progressive MP4: group by distinct resolution height and keep highest-bandwidth stream for each tier
+        val distinctVideoTiers = if (isHls || videoOptions.any { it.isHlsVariant }) {
+            val hlsVideo = videoOptions.filter { it.isHlsVariant }
+            val nonHlsVideo = videoOptions.filterNot { it.isHlsVariant }
+                .groupBy { it.getResolutionHeight() }
+                .mapNotNull { (_, optionsInTier) ->
+                    optionsInTier.maxWithOrNull(
+                        compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                            .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                    )
+                }
+            hlsVideo + nonHlsVideo
+        } else {
+            videoOptions
+                .groupBy { it.getResolutionHeight() }
+                .mapNotNull { (_, optionsInTier) ->
+                    optionsInTier.maxWithOrNull(
+                        compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
+                            .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                            .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                    )
+                }
+        }
 
         // 6. Present a clean, descending list from highest resolution to lowest resolution
         val sortedCandidates = distinctVideoTiers.sortedWith(
@@ -873,12 +907,17 @@ class VideoSnifferEngine(
         // Enforce strict size & bandwidth consistency across descending resolutions
         val coherentCandidates = HlsManifestParser.enforceSizeCoherence(sortedCandidates)
 
-        // Never allow identical resolutions with the same file size to render twice
+        // Retain all declared HLS qualities; for progressive MP4, never allow identical resolutions with same size twice
         val uniqueVideoOptions = mutableListOf<VideoQualityOption>()
         val seenHeights = mutableSetOf<Int>()
         val seenExactSizes = mutableSetOf<Long>()
 
         for (opt in coherentCandidates) {
+            if (opt.isHlsVariant) {
+                // Retain all genuine declared HLS variants (e.g. 1080p, 720p, 480p, 240p)
+                uniqueVideoOptions.add(opt)
+                continue
+            }
             val h = opt.getResolutionHeight()
             if (h > 0 && seenHeights.contains(h)) {
                 continue

@@ -454,7 +454,7 @@ private fun DirectQualitySheetContent(
 
         // 5. Big Prominent "DOWNLOAD" Action Button
         val selectedBadge = selectedOption?.cleanResolutionBadge ?: "Best"
-        val selectedSize = if (selectedOption?.isHlsVariant == true) "Adaptive Stream" else selectedOption?.formattedSize ?: ""
+        val selectedSize = selectedOption?.formattedSize ?: ""
         val downloadButtonText = buildString {
             append("Download")
             if (selectedBadge.isNotBlank()) append(" • $selectedBadge")
@@ -616,10 +616,10 @@ private fun InShotQualityCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // Exact/Estimated File Size Pill
-                val displaySize = if (option.isHlsVariant) {
-                    "Adaptive Stream"
-                } else if (option.formattedSize.isNotBlank()) {
+                val displaySize = if (option.formattedSize.isNotBlank()) {
                     option.formattedSize
+                } else if (option.isHlsVariant) {
+                    "Adaptive HLS"
                 } else {
                     option.formatTag
                 }
@@ -802,22 +802,27 @@ private fun resolveComprehensiveQualities(item: SniffedMediaItem): List<VideoQua
 private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): List<VideoQualityOption> {
     if (list.isEmpty()) return emptyList()
 
-    // 1. Deduplication by exact clean URL
-    val urlDeduplicated = list
+    // 1. Deduplication:
+    // Retain ALL declared HLS variants (preserve 1080p, 720p, 480p, 240p, distinct by resolution and bandwidth)
+    // For progressive MP4, deduplicate by clean URL
+    val hlsOptions = list.filter { it.isHlsVariant }.distinctBy {
+        "${it.resolution}_${it.bandwidthBps}_${it.cleanResolutionBadge}_${it.renditionKey ?: it.url}"
+    }
+    val nonHlsOptions = list.filterNot { it.isHlsVariant }
         .groupBy { it.url.substringBefore('?').substringBefore('#') }
         .mapNotNull { (_, options) ->
             options.maxWithOrNull(
-                compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
-                    .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
                     .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
             )
         }
+    val combinedOptions = hlsOptions + nonHlsOptions
 
     // 2. Separate audio and video
-    val audioOptions = urlDeduplicated.filter {
+    val audioOptions = combinedOptions.filter {
         it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
     }
-    val videoOptions = urlDeduplicated.filterNot {
+    val videoOptions = combinedOptions.filterNot {
         it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
     }
 

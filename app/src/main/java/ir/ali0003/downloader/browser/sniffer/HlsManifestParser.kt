@@ -36,7 +36,8 @@ object HlsManifestParser {
     fun fetchAndParseMasterPlaylist(
         masterUrl: String,
         headersMap: Map<String, String> = emptyMap(),
-        fallbackDurationSeconds: Double = 0.0
+        fallbackDurationSeconds: Double = 0.0,
+        networkLogs: List<String> = emptyList()
     ): HlsParseResult {
         return try {
             val headers = buildHeaders(headersMap)
@@ -47,35 +48,44 @@ object HlsManifestParser {
 
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    return HlsParseResult(emptyList(), fallbackDurationSeconds)
+                    val probed = probeParentMasterPlaylist(masterUrl, headersMap, fallbackDurationSeconds, networkLogs)
+                    return probed ?: HlsParseResult(emptyList(), fallbackDurationSeconds)
                 }
                 val body = response.body?.string() ?: return HlsParseResult(emptyList(), fallbackDurationSeconds)
 
-                // If body is a Media Playlist (#EXTINF directly, no #EXT-X-STREAM-INF), probe candidate parent master playlists
-                if (body.contains("#EXTM3U") && !body.contains("#EXT-X-STREAM-INF:") && body.contains("#EXTINF:")) {
-                    val probedMaster = probeParentMasterPlaylist(masterUrl, headersMap, fallbackDurationSeconds)
-                    if (probedMaster != null && probedMaster.qualities.isNotEmpty()) {
-                        return probedMaster
-                    }
+                // 1. Master Playlist Priority: If manifest contains #EXT-X-STREAM-INF, parse ALL variant streams
+                if (body.contains("#EXTM3U") && body.contains("#EXT-X-STREAM-INF:")) {
+                    return parseManifestContentWithDuration(body, masterUrl, headersMap, fallbackDurationSeconds)
                 }
 
+                // 2. Sub-playlist (Media Playlist without #EXT-X-STREAM-INF):
+                // Do NOT settle for single-tier detection. Strip rendition-specific URL path segments/parameters
+                // or query browser network logs to fetch the parent Master Manifest.
+                val probedMaster = probeParentMasterPlaylist(masterUrl, headersMap, fallbackDurationSeconds, networkLogs)
+                if (probedMaster != null && probedMaster.qualities.isNotEmpty()) {
+                    return probedMaster
+                }
+
+                // Fallback to parsing single media playlist
                 parseManifestContentWithDuration(body, masterUrl, headersMap, fallbackDurationSeconds)
             }
         } catch (e: Exception) {
-            HlsParseResult(emptyList(), fallbackDurationSeconds)
+            val probed = probeParentMasterPlaylist(masterUrl, headersMap, fallbackDurationSeconds, networkLogs)
+            probed ?: HlsParseResult(emptyList(), fallbackDurationSeconds)
         }
     }
 
     /**
-     * Probes candidate parent master playlists (e.g. master.m3u8, index.m3u8, playlist.m3u8)
-     * when a sub-variant media playlist was intercepted.
+     * Probes candidate parent master playlists by querying browser network logs
+     * and stripping rendition-specific URL path segments/parameters.
      */
     private fun probeParentMasterPlaylist(
         subVariantUrl: String,
         headersMap: Map<String, String>,
-        fallbackDurationSeconds: Double
+        fallbackDurationSeconds: Double,
+        networkLogs: List<String> = emptyList()
     ): HlsParseResult? {
-        val candidates = generateCandidateMasterUrls(subVariantUrl)
+        val candidates = generateCandidateMasterUrls(subVariantUrl, networkLogs)
         val headers = buildHeaders(headersMap)
 
         for (candidateUrl in candidates) {
@@ -103,59 +113,123 @@ object HlsManifestParser {
         return null
     }
 
-    private fun generateCandidateMasterUrls(variantUrl: String): List<String> {
+    fun generateCandidateMasterUrls(variantUrl: String, networkLogs: List<String> = emptyList()): List<String> {
         val candidates = mutableListOf<String>()
-        try {
-            val uri = Uri.parse(variantUrl)
-            val path = uri.path ?: return emptyList()
-            val lastSlash = path.lastIndexOf('/')
-            val parentPath = if (lastSlash != -1) path.substring(0, lastSlash) else ""
-            val grandParentPath = if (parentPath.lastIndexOf('/') != -1) parentPath.substring(0, parentPath.lastIndexOf('/')) else ""
+        val uri = try { Uri.parse(variantUrl) } catch (_: Exception) { null } ?: return emptyList()
+        val host = uri.host ?: return emptyList()
 
-            val schemeAndHost = "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}"
-            val queryStr = if (!uri.query.isNullOrBlank()) "?${uri.query}" else ""
+        // 1. Query browser network logs for candidate master manifests from the same host
+        val logM3u8s = networkLogs.filter { logUrl ->
+            logUrl != variantUrl && logUrl.contains(".m3u8", ignoreCase = true)
+        }
+        val highPriorityLogUrls = logM3u8s.filter { logUrl ->
+            try {
+                val logUri = Uri.parse(logUrl)
+                logUri.host.equals(host, ignoreCase = true) &&
+                        (logUrl.contains("master", ignoreCase = true) ||
+                         logUrl.contains("playlist", ignoreCase = true) ||
+                         logUrl.contains("manifest", ignoreCase = true) ||
+                         logUrl.contains("main", ignoreCase = true))
+            } catch (_: Exception) { false }
+        }
+        candidates.addAll(highPriorityLogUrls)
 
-            val standardMasterFilenames = listOf("master.m3u8", "index.m3u8", "playlist.m3u8")
+        val otherSameHostLogUrls = logM3u8s.filter { logUrl ->
+            try {
+                val logUri = Uri.parse(logUrl)
+                logUri.host.equals(host, ignoreCase = true) && !candidates.contains(logUrl)
+            } catch (_: Exception) { false }
+        }
+        candidates.addAll(otherSameHostLogUrls)
 
-            // In parent directory
+        val path = uri.path ?: ""
+        val schemeAndHost = "${uri.scheme}://${uri.host}${if (uri.port != -1) ":${uri.port}" else ""}"
+        val queryStr = if (!uri.query.isNullOrBlank()) "?${uri.query}" else ""
+
+        // 2. Strip rendition-specific query parameters (e.g. ?quality=720, ?resolution=720p, ?rendition=720)
+        if (!uri.query.isNullOrBlank()) {
+            val strippedParams = uri.queryParameterNames.filterNot { name ->
+                val lower = name.lowercase()
+                lower in listOf("quality", "resolution", "res", "rendition", "height", "width", "bandwidth", "bw", "tier", "track", "level", "profile", "format")
+            }
+            if (strippedParams.size < uri.queryParameterNames.size) {
+                val newQuery = strippedParams.joinToString("&") { key ->
+                    "$key=${uri.getQueryParameter(key)}"
+                }
+                val cleanedQueryUrl = "$schemeAndHost$path${if (newQuery.isNotBlank()) "?$newQuery" else ""}"
+                if (cleanedQueryUrl != variantUrl && !candidates.contains(cleanedQueryUrl)) {
+                    candidates.add(cleanedQueryUrl)
+                }
+            }
+            val noQueryUrl = "$schemeAndHost$path"
+            if (noQueryUrl != variantUrl && !candidates.contains(noQueryUrl)) {
+                candidates.add(noQueryUrl)
+            }
+        }
+
+        // 3. Strip rendition-specific URL path segments
+        // e.g. /video/720p/index.m3u8 -> /video/index.m3u8, /video/master.m3u8
+        // e.g. /hls/1080p/playlist.m3u8 -> /hls/playlist.m3u8, /hls/master.m3u8
+        val renditionSegmentRegex = """/(1080p?|720p?|480p?|360p?|240p?|1440p?|2160p?|4kp?|2kp?|hls_\d+p?|video_\d+p?|stream_\d+p?|tracks-[^/]+)/""".toRegex(RegexOption.IGNORE_CASE)
+        if (renditionSegmentRegex.containsMatchIn(path)) {
+            val strippedPath = renditionSegmentRegex.replace(path, "/")
+            val candidate = "$schemeAndHost$strippedPath$queryStr"
+            if (candidate != variantUrl && !candidates.contains(candidate)) {
+                candidates.add(candidate)
+            }
+            val strippedParent = strippedPath.substringBeforeLast('/')
+            for (mName in listOf("master.m3u8", "playlist.m3u8", "index.m3u8")) {
+                val c = "$schemeAndHost$strippedParent/$mName$queryStr"
+                if (c != variantUrl && !candidates.contains(c)) {
+                    candidates.add(c)
+                }
+            }
+        }
+
+        // 4. Filename replacements for subvariant patterns
+        // e.g. 720p.m3u8 -> master.m3u8, playlist.m3u8, index.m3u8
+        // e.g. hls_250p.m3u8 -> master.m3u8
+        // e.g. video_360.m3u8 -> master.m3u8
+        val fileName = path.substringAfterLast('/')
+        val standardMasterFilenames = listOf("master.m3u8", "playlist.m3u8", "index.m3u8", "manifest.m3u8")
+
+        if (fileName.contains(Regex("""(hls_|video_|stream_|chunklist_)?\d+p?|chunklist""", RegexOption.IGNORE_CASE))) {
             for (name in standardMasterFilenames) {
-                val candidate = "$schemeAndHost$parentPath/$name$queryStr"
+                val replaced = variantUrl.replace(fileName, name)
+                if (replaced != variantUrl && !candidates.contains(replaced)) {
+                    candidates.add(replaced)
+                }
+            }
+        }
+
+        // 5. Parent and grandparent directories
+        val lastSlash = path.lastIndexOf('/')
+        val parentPath = if (lastSlash != -1) path.substring(0, lastSlash) else ""
+        val grandParentPath = if (parentPath.lastIndexOf('/') != -1) parentPath.substring(0, parentPath.lastIndexOf('/')) else ""
+
+        for (name in standardMasterFilenames) {
+            val candidate = "$schemeAndHost$parentPath/$name$queryStr"
+            if (candidate != variantUrl && !candidates.contains(candidate)) {
+                candidates.add(candidate)
+            }
+        }
+
+        if (grandParentPath.isNotEmpty()) {
+            for (name in standardMasterFilenames) {
+                val candidate = "$schemeAndHost$grandParentPath/$name$queryStr"
                 if (candidate != variantUrl && !candidates.contains(candidate)) {
                     candidates.add(candidate)
                 }
             }
+        }
 
-            // In grand-parent directory if nested (e.g. /hls/720p/index.m3u8 -> /hls/master.m3u8)
-            if (grandParentPath.isNotEmpty()) {
-                for (name in standardMasterFilenames) {
-                    val candidate = "$schemeAndHost$grandParentPath/$name$queryStr"
-                    if (candidate != variantUrl && !candidates.contains(candidate)) {
-                        candidates.add(candidate)
-                    }
-                }
-            }
-
-            // Regex replacements for subvariant patterns:
-            // e.g. hls_250p.m3u8 -> master.m3u8 or index.m3u8
-            // 720p.m3u8 -> master.m3u8
-            // video_360.m3u8 -> master.m3u8
-            val fileName = path.substringAfterLast('/')
-            if (fileName.contains(Regex("""(hls_)?\d+p?""", RegexOption.IGNORE_CASE))) {
-                for (name in standardMasterFilenames) {
-                    val replaced = variantUrl.replace(fileName, name)
-                    if (replaced != variantUrl && !candidates.contains(replaced)) {
-                        candidates.add(replaced)
-                    }
-                }
-            }
-        } catch (_: Exception) {}
         return candidates
     }
 
     fun fetchAndParseMasterPlaylist(
         masterUrl: String,
         headersMap: Map<String, String>
-    ): List<VideoQualityOption> = fetchAndParseMasterPlaylist(masterUrl, headersMap, 0.0).qualities
+    ): List<VideoQualityOption> = fetchAndParseMasterPlaylist(masterUrl, headersMap, 0.0, emptyList()).qualities
 
     fun parseManifestContent(manifestText: String, baseUrl: String): List<VideoQualityOption> {
         return parseManifestContentWithDuration(manifestText, baseUrl, emptyMap(), 0.0).qualities
@@ -247,7 +321,8 @@ object HlsManifestParser {
                             totalBandwidth >= 3_500_000L -> 1920 to 1080
                             totalBandwidth in 1_600_000L..3_499_999L -> 1280 to 720
                             totalBandwidth in 750_000L..1_599_999L -> 854 to 480
-                            else -> 640 to 360
+                            totalBandwidth in 400_000L..749_999L -> 640 to 360
+                            else -> 426 to 240
                         }
                     } else {
                         0 to 0
@@ -276,9 +351,9 @@ object HlsManifestParser {
 
             // Preserve EVERY declared #EXT-X-STREAM-INF track variant (1080p, 720p, 480p, 360p, 240p, etc.)
             // Strip out arbitrary heuristic filters, artificial bitrate drop rules, and preview deduplication
-            // Deduplicate only if identical URL is declared multiple times
+            // Deduplicate only if identical URL and bandwidth are declared multiple times
             val declaredVariants = rawVariants
-                .distinctBy { it.url }
+                .distinctBy { if (it.url.isNotBlank()) "${it.url}_${it.bandwidth}" else "${it.height}_${it.bandwidth}" }
                 .sortedWith(
                     compareByDescending<RawVariant> { it.height }
                         .thenByDescending { it.bandwidth }
@@ -513,6 +588,7 @@ object HlsManifestParser {
                 maxDim >= 1280 || minDim >= 720 -> "720p HD"
                 maxDim >= 854 || minDim >= 480 -> "480p SD"
                 maxDim >= 640 || minDim >= 360 -> "360p SD"
+                maxDim >= 426 || minDim >= 240 -> "240p"
                 minDim > 0 -> "${minDim}p"
                 else -> "${maxDim}p"
             }
@@ -526,7 +602,8 @@ object HlsManifestParser {
             bandwidth >= 3_500_000L -> "1080p FHD"
             bandwidth in 1_600_000L..3_499_999L -> "720p HD"
             bandwidth in 750_000L..1_599_999L -> "480p SD"
-            bandwidth > 0L -> "360p SD"
+            bandwidth in 400_000L..749_999L -> "360p SD"
+            bandwidth > 0L -> "240p"
             else -> "Source Stream"
         }
     }
