@@ -87,6 +87,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
+import ir.ali0003.downloader.data.model.DownloadStatus
 import ir.ali0003.downloader.data.vault.VaultFileManager
 import ir.ali0003.downloader.ui.glass.GlassTheme
 import kotlinx.coroutines.delay
@@ -136,16 +137,27 @@ fun InAppVideoPlayerSheet(
     val speeds = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
     var currentSpeedIndex by remember { mutableIntStateOf(2) } // default 1.0x
 
-    // Create ExoPlayer instance with explicit AudioAttributes and Media3 Cache DataSource
+    // Create ExoPlayer instance: For completed tasks with a valid local target file,
+    // play DIRECTLY via FileDataSource / DefaultDataSource and do NOT attempt to load from Media3 SimpleCache
     val exoPlayer = remember(task.id) {
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
         val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
-        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
-            ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getCacheDataSourceFactory(context, headers)
-        )
+        val targetLocal = resolveLocalTargetFile(context, task, vaultFileManager)
+        val isCompletedWithLocalFile = task.status == DownloadStatus.COMPLETED && targetLocal != null
+
+        val mediaSourceFactory = if (isCompletedWithLocalFile) {
+            // Standalone local file playback without SimpleCache overhead or cache keys
+            val fileDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(fileDataSourceFactory)
+        } else {
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+                ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getCacheDataSourceFactory(context, headers)
+            )
+        }
+
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, true)
@@ -182,27 +194,15 @@ fun InAppVideoPlayerSheet(
         }
     }
 
-    // Resolve media URI: seamlessly handling Media3 SimpleCache offline HLS, local files, and direct streams
+    // Resolve media URI: seamlessly handling standalone local files, Media3 SimpleCache offline HLS, and direct streams
     LaunchedEffect(task.id) {
-        val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
-        val targetFile = vaultFileManager.resolveTaskFile(task)
-        val isLocalProgressiveFile = targetFile != null &&
-                targetFile.exists() &&
-                targetFile.length() > 512L &&
-                !isPlaceholderFile(targetFile)
+        val targetLocal = resolveLocalTargetFile(context, task, vaultFileManager)
+        val isCompletedWithLocalFile = task.status == DownloadStatus.COMPLETED && targetLocal != null
 
-        // Make sure headers are registered in provider
-        val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
-        ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.registerRequestHeaders(task.url, headers)
-
-        val mediaItem = if (isHls && !isLocalProgressiveFile) {
-            // Offline HLS downloaded via Media3 or online stream backed by CacheDataSource
-            MediaItem.Builder()
-                .setUri(Uri.parse(task.url))
-                .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
-                .build()
-        } else if (isLocalProgressiveFile) {
-            val validFile = targetFile!!
+        if (isCompletedWithLocalFile) {
+            // Play DIRECTLY as a standalone local media item using standard FileDataSource / Uri.fromFile(file)
+            // Do NOT attempt to load from Media3 SimpleCache for completed tasks that have already been remuxed into standalone MP4 files.
+            val validFile = targetLocal!!
             val fileNameLower = validFile.name.lowercase()
             val mimeType = when {
                 fileNameLower.endsWith(".webm") -> androidx.media3.common.MimeTypes.VIDEO_WEBM
@@ -212,25 +212,66 @@ fun InAppVideoPlayerSheet(
                 fileNameLower.endsWith(".ts") -> androidx.media3.common.MimeTypes.VIDEO_MP2T
                 else -> androidx.media3.common.MimeTypes.VIDEO_MP4
             }
-            MediaItem.Builder()
+            val mediaItem = MediaItem.Builder()
                 .setUri(Uri.fromFile(validFile))
                 .setMimeType(mimeType)
                 .build()
+
+            val fileDataSourceFactory = androidx.media3.datasource.FileDataSource.Factory()
+            val mediaSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(fileDataSourceFactory)
+                .createMediaSource(mediaItem)
+
+            exoPlayer.setMediaSource(mediaSource)
+            exoPlayer.prepare()
+            exoPlayer.play()
         } else {
-            // Online direct or streaming URL fallback
-            if (isHls) {
+            val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
+            val isLocalProgressiveFile = targetLocal != null &&
+                    targetLocal.exists() &&
+                    targetLocal.length() > 512L &&
+                    !isPlaceholderFile(targetLocal)
+
+            // Make sure headers are registered in provider
+            val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
+            ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.registerRequestHeaders(task.url, headers)
+
+            val mediaItem = if (isHls && !isLocalProgressiveFile) {
+                // Offline HLS downloaded via Media3 or online stream backed by CacheDataSource
                 MediaItem.Builder()
                     .setUri(Uri.parse(task.url))
                     .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
                     .build()
+            } else if (isLocalProgressiveFile) {
+                val validFile = targetLocal!!
+                val fileNameLower = validFile.name.lowercase()
+                val mimeType = when {
+                    fileNameLower.endsWith(".webm") -> androidx.media3.common.MimeTypes.VIDEO_WEBM
+                    fileNameLower.endsWith(".mkv") -> androidx.media3.common.MimeTypes.VIDEO_MATROSKA
+                    fileNameLower.endsWith(".mp3") -> androidx.media3.common.MimeTypes.AUDIO_MPEG
+                    fileNameLower.endsWith(".m4a") -> androidx.media3.common.MimeTypes.AUDIO_AAC
+                    fileNameLower.endsWith(".ts") -> androidx.media3.common.MimeTypes.VIDEO_MP2T
+                    else -> androidx.media3.common.MimeTypes.VIDEO_MP4
+                }
+                MediaItem.Builder()
+                    .setUri(Uri.fromFile(validFile))
+                    .setMimeType(mimeType)
+                    .build()
             } else {
-                MediaItem.fromUri(Uri.parse(task.url))
+                // Online direct or streaming URL fallback
+                if (isHls) {
+                    MediaItem.Builder()
+                        .setUri(Uri.parse(task.url))
+                        .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                        .build()
+                } else {
+                    MediaItem.fromUri(Uri.parse(task.url))
+                }
             }
-        }
 
-        exoPlayer.setMediaItem(mediaItem)
-        exoPlayer.prepare()
-        exoPlayer.play()
+            exoPlayer.setMediaItem(mediaItem)
+            exoPlayer.prepare()
+            exoPlayer.play()
+        }
     }
 
     // Player event listener & clean resource release
@@ -249,6 +290,20 @@ fun InAppVideoPlayerSheet(
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 Log.e("InAppVideoPlayer", "Playback error: ${error.message}", error)
+                val targetLocal = resolveLocalTargetFile(context, task, vaultFileManager)
+                if (task.status == DownloadStatus.COMPLETED && targetLocal != null) {
+                    // Direct local file retry using DefaultMediaSourceFactory if ProgressiveMediaSource threw extractor issue
+                    try {
+                        val localItem = MediaItem.fromUri(Uri.fromFile(targetLocal))
+                        val defaultMediaSource = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(context)
+                            .createMediaSource(localItem)
+                        exoPlayer.setMediaSource(defaultMediaSource)
+                        exoPlayer.prepare()
+                        exoPlayer.play()
+                        return
+                    } catch (_: Exception) {}
+                }
+
                 if (exoPlayer.currentMediaItem?.localConfiguration?.uri?.scheme == "file" && task.url.isNotBlank()) {
                     Log.d("InAppVideoPlayer", "Falling back to stream URL: ${task.url}")
                     val fallbackItem = if (task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)) {
@@ -853,4 +908,51 @@ private fun isPlaceholderFile(file: File): Boolean {
     } catch (_: Exception) {
         false
     }
+}
+
+private fun resolveLocalTargetFile(context: Context, task: DownloadTaskEntity, vaultFileManager: VaultFileManager): File? {
+    // 1. Direct explicit task.localFilePath if non-blank and existing
+    task.localFilePath?.takeIf { it.isNotBlank() }?.let { path ->
+        val file = File(path)
+        if (file.exists() && file.length() > 512L && !isPlaceholderFile(file)) {
+            return file
+        }
+    }
+
+    // 2. VaultFileManager multi-directory resolver
+    val resolved = vaultFileManager.resolveTaskFile(task)
+    if (resolved != null && resolved.exists() && resolved.length() > 512L && !isPlaceholderFile(resolved)) {
+        return resolved
+    }
+
+    // 3. Search public Downloads and private app directories
+    val publicDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+    val appPublicDir = File(publicDir, "0003_Downloader")
+    val extDir = File(context.getExternalFilesDir(null), "downloads")
+    val vaultDir = File(context.filesDir, "vault_media")
+
+    val clean = task.fileName.trimStart('.')
+    val sanitized = clean.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+    val candidates = mutableListOf(clean, sanitized)
+    if (clean.endsWith(".m3u8", ignoreCase = true)) {
+        candidates.add(clean.removeSuffix(".m3u8") + ".mp4")
+        candidates.add(sanitized.removeSuffix(".m3u8") + ".mp4")
+    }
+    if (!clean.endsWith(".mp4", ignoreCase = true)) {
+        candidates.add("$clean.mp4")
+        candidates.add("$sanitized.mp4")
+    }
+
+    val searchDirs = listOf(appPublicDir, publicDir, extDir, vaultDir, context.filesDir)
+    for (dir in searchDirs) {
+        if (!dir.exists()) continue
+        for (name in candidates.distinct()) {
+            val f = File(dir, name)
+            if (f.exists() && f.length() > 512L && !isPlaceholderFile(f)) return f
+            val vFile = File(dir, ".$name.vault")
+            if (vFile.exists() && vFile.length() > 512L && !isPlaceholderFile(vFile)) return vFile
+        }
+    }
+
+    return null
 }

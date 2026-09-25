@@ -208,6 +208,205 @@ class VideoSnifferEngine(
                 }
             }
         }
+
+        @JavascriptInterface
+        fun onMediaDefinitionsFound(json: String?) {
+            if (json.isNullOrBlank()) return
+            mainHandler.post {
+                try {
+                    val pageUrl = webView.url ?: currentPageUrl.get()
+                    val currentTitle = webView.title ?: currentPageTitle.get()
+                    val userAgent = try { webView.settings.userAgentString } catch (_: Exception) { "" }
+                    parseAndProcessMediaDefinitions(
+                        json = json,
+                        pageUrl = pageUrl,
+                        pageTitle = currentTitle,
+                        userAgent = userAgent
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.e("VideoSnifferEngine", "Error handling onMediaDefinitionsFound: ${e.message}", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * Parses streaming media definitions (such as Pornhub flashvars.mediaDefinitions)
+     * and populates all declared quality tiers (1080p, 720p, 480p, 240p) in HLS and MP4 formats.
+     */
+    fun parseAndProcessMediaDefinitions(
+        json: String,
+        pageUrl: String,
+        pageTitle: String,
+        userAgent: String
+    ) {
+        if (json.isBlank()) return
+        try {
+            val jsonArray = org.json.JSONArray(json)
+            val extractedQualities = mutableListOf<VideoQualityOption>()
+            var primaryHlsUrl: String? = null
+            var primaryMp4Url: String? = null
+            var defaultVideoUrl: String? = null
+
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.optJSONObject(i) ?: continue
+                val format = obj.optString("format", "").trim().lowercase()
+                val isDefault = obj.optBoolean("defaultQuality", false)
+                val rawVideoUrl = (obj.optString("videoUrl").takeIf { it.isNotBlank() && it != "null" }
+                    ?: obj.optString("url").takeIf { it.isNotBlank() && it != "null" }
+                    ?: "").trim()
+
+                if (rawVideoUrl.isBlank()) continue
+                val videoUrl = rawVideoUrl.replace("\\/", "/")
+
+                if (defaultVideoUrl == null || isDefault) {
+                    defaultVideoUrl = videoUrl
+                }
+
+                val isHls = format == "hls" || videoUrl.contains(".m3u8", ignoreCase = true)
+                if (isHls && primaryHlsUrl == null) {
+                    primaryHlsUrl = videoUrl
+                } else if (!isHls && primaryMp4Url == null) {
+                    primaryMp4Url = videoUrl
+                }
+
+                // Extract quality field: can be string ("1080", "720p"), int (1080), or array (["1080", "720", ...])
+                val rawQualityList = mutableListOf<String>()
+                val qualityOpt = obj.opt("quality")
+                when (qualityOpt) {
+                    is org.json.JSONArray -> {
+                        for (qIdx in 0 until qualityOpt.length()) {
+                            val qVal = qualityOpt.opt(qIdx)?.toString()?.trim()
+                            if (!qVal.isNullOrBlank() && qVal != "null") rawQualityList.add(qVal)
+                        }
+                    }
+                    is org.json.JSONObject -> {
+                        val label = qualityOpt.optString("label")
+                        if (label.isNotBlank()) rawQualityList.add(label)
+                    }
+                    null -> {
+                        val height = obj.optInt("height", 0)
+                        if (height > 0) rawQualityList.add(height.toString())
+                    }
+                    else -> {
+                        val qStr = qualityOpt.toString().trim()
+                        if (qStr.isNotBlank() && qStr != "null") {
+                            rawQualityList.add(qStr)
+                        }
+                    }
+                }
+
+                if (rawQualityList.isEmpty()) {
+                    val inferred = when {
+                        videoUrl.contains("1080", ignoreCase = true) -> "1080"
+                        videoUrl.contains("720", ignoreCase = true) -> "720"
+                        videoUrl.contains("480", ignoreCase = true) -> "480"
+                        videoUrl.contains("360", ignoreCase = true) -> "360"
+                        videoUrl.contains("240", ignoreCase = true) -> "240"
+                        else -> if (isHls) "Adaptive HLS" else "720"
+                    }
+                    rawQualityList.add(inferred)
+                }
+
+                for (q in rawQualityList) {
+                    val digits = q.replace("[^0-9]".toRegex(), "")
+                    val heightInt = digits.toIntOrNull() ?: 0
+                    val resolution = when (heightInt) {
+                        2160 -> "3840x2160"
+                        1440 -> "2560x1440"
+                        1080 -> "1920x1080"
+                        720 -> "1280x720"
+                        480 -> "854x480"
+                        360 -> "640x360"
+                        240 -> "426x240"
+                        else -> if (heightInt > 0) "${(heightInt * 16) / 9}x$heightInt" else ""
+                    }
+                    val label = if (heightInt > 0) "${heightInt}p" else q
+                    val bandwidthBps = when (heightInt) {
+                        2160 -> 15_000_000L
+                        1440 -> 8_000_000L
+                        1080 -> 5_000_000L
+                        720 -> 2_500_000L
+                        480 -> 1_200_000L
+                        360 -> 800_000L
+                        240 -> 400_000L
+                        else -> obj.optLong("bitrate", obj.optLong("bandwidth", 0L))
+                    }
+                    val formatTag = if (isHls) "HLS" else if (format.contains("webm", ignoreCase = true)) "WEBM" else "MP4"
+
+                    extractedQualities.add(
+                        VideoQualityOption(
+                            label = label,
+                            resolution = resolution,
+                            bandwidthBps = bandwidthBps,
+                            url = videoUrl,
+                            isHlsVariant = isHls,
+                            estimatedSizeBytes = 0L,
+                            formatTag = formatTag
+                        )
+                    )
+                }
+            }
+
+            if (extractedQualities.isEmpty()) return
+
+            val targetUrl = primaryMp4Url ?: primaryHlsUrl ?: defaultVideoUrl ?: return
+            val isTargetHls = targetUrl.contains(".m3u8", ignoreCase = true) || (primaryMp4Url == null && primaryHlsUrl != null)
+            val fullHeaders = extractHeadersForUrl(targetUrl, pageUrl, userAgent)
+
+            val aggregated = synchronized(aggregationLock) {
+                accumulatedHeaders.putAll(fullHeaders)
+                accumulatedRawQualities.addAll(extractedQualities)
+
+                val previous = canonicalVideoItem
+                val bestTitle = pickBestTitle(previous?.title, pageTitle, targetUrl)
+                val bestPoster = previous?.thumbnailUrl
+                val bestDuration = previous?.durationSeconds ?: 0.0
+                val bestBaseSize = previous?.fileSizeBytes ?: 0L
+
+                val standardizedQualities = normalizeAndBucketQualities(
+                    rawQualities = accumulatedRawQualities,
+                    durationSeconds = bestDuration,
+                    baseFileSizeBytes = bestBaseSize,
+                    isHls = isTargetHls || previous?.isM3u8 == true,
+                    fallbackUrl = targetUrl
+                )
+
+                val updatedItem = SniffedMediaItem(
+                    id = previous?.id ?: java.util.UUID.randomUUID().toString(),
+                    url = previous?.url ?: targetUrl,
+                    pageUrl = if (pageUrl.isNotBlank()) pageUrl else currentPageUrl.get(),
+                    title = bestTitle,
+                    mimeType = if (isTargetHls) "application/x-mpegURL" else "video/mp4",
+                    isM3u8 = isTargetHls || previous?.isM3u8 == true,
+                    headers = accumulatedHeaders.toMap(),
+                    thumbnailUrl = bestPoster,
+                    durationSeconds = bestDuration,
+                    fileSizeBytes = bestBaseSize,
+                    qualities = standardizedQualities
+                )
+                canonicalVideoItem = updatedItem
+                updatedItem
+            }
+
+            mainHandler.post {
+                onMediaDetected(aggregated)
+            }
+
+            // If HLS manifest was found, also probe master playlist details in background
+            primaryHlsUrl?.let { hlsUrl ->
+                scope.launch {
+                    processDetectedMediaUrl(
+                        mediaUrl = hlsUrl,
+                        pageUrl = pageUrl,
+                        pageTitle = pageTitle,
+                        requestHeaders = fullHeaders
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VideoSnifferEngine", "Failed to parse mediaDefinitions: ${e.message}", e)
+        }
     }
 
     private fun isAdOrJunkUrl(url: String): Boolean {
@@ -1046,6 +1245,8 @@ class VideoSnifferEngine(
     companion object {
         const val JS_BRIDGE_NAME = "AndroidVideoSniffer"
 
+        const val PORNHUB_FLASHVARS_EXTRACTOR_JS = "javascript:(function(){ try { var k = Object.keys(window).find(function(key){ return key.indexOf('flashvars') !== -1; }); if (k && window[k].mediaDefinitions) { window.AndroidBridge.onMediaDefinitionsFound(JSON.stringify(window[k].mediaDefinitions)); } } catch(e){} })();"
+
         val DOM_SNIFFER_JS = """
             (function() {
                 if (window.__videoSnifferInjected) return;
@@ -1120,6 +1321,16 @@ class VideoSnifferEngine(
                 }
 
                 function scanPlayerConfigs() {
+                    try {
+                        var k = Object.keys(window).find(function(key){ return key.indexOf('flashvars') !== -1; });
+                        if (k && window[k] && window[k].mediaDefinitions) {
+                            var bridge = window.AndroidBridge || window.AndroidVideoSniffer;
+                            if (bridge && typeof bridge.onMediaDefinitionsFound === 'function') {
+                                bridge.onMediaDefinitionsFound(JSON.stringify(window[k].mediaDefinitions));
+                            }
+                        }
+                    } catch(e) {}
+
                     try {
                         if (window.html5player) {
                             var hp = window.html5player;

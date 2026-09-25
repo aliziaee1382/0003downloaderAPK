@@ -63,6 +63,9 @@ interface DownloadDao {
     @Query("UPDATE download_tasks SET isHidden = :isHidden WHERE id = :id")
     suspend fun updateHiddenStatus(id: Long, isHidden: Boolean)
 
+    @Query("UPDATE download_tasks SET localFilePath = :path WHERE id = :id")
+    suspend fun updateLocalFilePath(id: Long, path: String)
+
     @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, downloadedBytes = totalBytes, speedBps = 0, etaSeconds = 0 WHERE id = :id")
     suspend fun markCompleted(id: Long, completedAt: Long = System.currentTimeMillis())
 

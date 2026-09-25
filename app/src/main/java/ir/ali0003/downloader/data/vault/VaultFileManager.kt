@@ -81,6 +81,7 @@ class VaultFileManager(
 
             // Update entity in Room
             downloadDao.updateHiddenStatus(task.id, isHidden = true)
+            downloadDao.updateLocalFilePath(task.id, targetVaultFile.absolutePath)
             Log.d(TAG, "Successfully moved task ${task.id} (${task.fileName}) to Vault: ${targetVaultFile.absolutePath}")
             true
         } catch (e: Exception) {
@@ -117,6 +118,7 @@ class VaultFileManager(
             }
 
             downloadDao.updateHiddenStatus(task.id, isHidden = false)
+            downloadDao.updateLocalFilePath(task.id, targetPublicFile.absolutePath)
             Log.d(TAG, "Successfully unhidden task ${task.id} to: ${targetPublicFile.absolutePath}")
             true
         } catch (e: Exception) {
@@ -130,6 +132,12 @@ class VaultFileManager(
      * Also seamlessly resolves legacy tasks that were saved with .m3u8 instead of .mp4 (or vice versa).
      */
     fun resolveTaskFile(task: DownloadTaskEntity): File? {
+        // Fast-path: Check explicit task.localFilePath if recorded
+        task.localFilePath?.takeIf { it.isNotBlank() }?.let { path ->
+            val direct = File(path)
+            if (direct.exists()) return direct
+        }
+
         val cleanName = task.fileName.trimStart('.')
         val sanitizedName = cleanName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
         val hiddenName = ".$cleanName$VAULT_EXTENSION"

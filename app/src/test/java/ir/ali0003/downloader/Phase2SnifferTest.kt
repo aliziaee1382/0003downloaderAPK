@@ -474,4 +474,68 @@ class Phase2SnifferTest {
         )
         assertEquals("100 MB", exactOption.formattedSize)
     }
+
+    @Test
+    fun testPornhubMediaDefinitionsParsingExtractsMultiQualityTiers() {
+        val sampleJson = """
+            [
+                {
+                    "defaultQuality": false,
+                    "format": "hls",
+                    "videoUrl": "https://cdn.example.com/hls/master.m3u8",
+                    "quality": ["1080", "720", "480", "240"]
+                },
+                {
+                    "defaultQuality": false,
+                    "format": "mp4",
+                    "videoUrl": "https://cdn.example.com/videos/1080p.mp4",
+                    "quality": "1080"
+                },
+                {
+                    "defaultQuality": true,
+                    "format": "mp4",
+                    "videoUrl": "https://cdn.example.com/videos/720p.mp4",
+                    "quality": "720"
+                },
+                {
+                    "defaultQuality": false,
+                    "format": "mp4",
+                    "videoUrl": "https://cdn.example.com/videos/480p.mp4",
+                    "quality": "480"
+                },
+                {
+                    "defaultQuality": false,
+                    "format": "mp4",
+                    "videoUrl": "https://cdn.example.com/videos/240p.mp4",
+                    "quality": "240"
+                }
+            ]
+        """.trimIndent()
+
+        var detectedItem: SniffedMediaItem? = null
+        val engine = ir.ali0003.downloader.browser.sniffer.VideoSnifferEngine { item ->
+            detectedItem = item
+        }
+
+        engine.parseAndProcessMediaDefinitions(
+            json = sampleJson,
+            pageUrl = "https://example.com/view_video.php?viewkey=ph123",
+            pageTitle = "Sample Streaming Video",
+            userAgent = "Mozilla/5.0"
+        )
+
+        org.robolectric.shadows.ShadowLooper.runUiThreadTasksIncludingDelayedTasks()
+
+        val primary = engine.getPrimaryVideoItem()
+        assertNotNull(primary)
+
+        val tiers = primary!!.qualities
+        assertTrue(tiers.isNotEmpty())
+
+        val heights = tiers.map { it.getResolutionHeight() }.toSet()
+        assertTrue("Expected 1080 in tiers, found: $heights", heights.contains(1080))
+        assertTrue("Expected 720 in tiers, found: $heights", heights.contains(720))
+        assertTrue("Expected 480 in tiers, found: $heights", heights.contains(480))
+        assertTrue("Expected 240 in tiers, found: $heights", heights.contains(240))
+    }
 }

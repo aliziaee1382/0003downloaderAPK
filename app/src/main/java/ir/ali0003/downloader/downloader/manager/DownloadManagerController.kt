@@ -103,6 +103,7 @@ class DownloadManagerController(
 
                 val sanitizedName = task.fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
                 val outputFile = File(destDir, sanitizedName)
+                downloadDao.updateLocalFilePath(task.id, outputFile.absolutePath)
 
                 Log.d(TAG, "Starting task ${task.id} (${task.fileName}) -> ${outputFile.absolutePath}")
 

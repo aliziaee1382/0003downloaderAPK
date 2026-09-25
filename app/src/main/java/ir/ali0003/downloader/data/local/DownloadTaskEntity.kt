@@ -34,7 +34,8 @@ data class DownloadTaskEntity(
     val etaSeconds: Long = 0L,
     val errorMessage: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    val completedAt: Long? = null
+    val completedAt: Long? = null,
+    val localFilePath: String? = null
 ) {
     val progress: Float
         get() = if (totalBytes > 0L) {

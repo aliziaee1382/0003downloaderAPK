@@ -385,6 +385,10 @@ fun InAppBrowserScreen(
                                         viewModel.snifferEngine.VideoSnifferBridge(this),
                                         VideoSnifferEngine.JS_BRIDGE_NAME
                                     )
+                                    addJavascriptInterface(
+                                        viewModel.snifferEngine.VideoSnifferBridge(this),
+                                        "AndroidBridge"
+                                    )
 
                                     webViewClient = object : WebViewClient() {
                                         override fun shouldInterceptRequest(
@@ -412,6 +416,7 @@ fun InAppBrowserScreen(
                                                 )
                                                 try {
                                                     view?.evaluateJavascript(VideoSnifferEngine.DOM_SNIFFER_JS, null)
+                                                    view?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
                                                 } catch (_: Exception) {}
                                             }
                                         }
@@ -502,6 +507,9 @@ fun InAppBrowserScreen(
                                 scale = pulseScale,
                                 isExtracting = isExtractingMedia && sniffedMediaList.isEmpty(),
                                 onClick = {
+                                    try {
+                                        webViewInstance?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                                    } catch (_: Exception) {}
                                     showSnifferSheet = true
                                 }
                             )
@@ -532,6 +540,11 @@ fun InAppBrowserScreen(
 
         // Two-Step Media Sniffer Bottom Sheet (Source Selector -> Quality & Format Selector)
         if (showSnifferSheet) {
+            LaunchedEffect(Unit) {
+                try {
+                    webViewInstance?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                } catch (_: Exception) {}
+            }
             MediaSnifferBottomSheet(
                 sniffedMediaList = sniffedMediaList,
                 initialSelectedItem = selectedMedia,
