@@ -538,4 +538,26 @@ class Phase2SnifferTest {
         assertTrue("Expected 480 in tiers, found: $heights", heights.contains(480))
         assertTrue("Expected 240 in tiers, found: $heights", heights.contains(240))
     }
+
+    @Test
+    fun testCleanMetricFormattingWithoutRawSegmentStrings() {
+        // Known total size
+        val knownTotal = ir.ali0003.downloader.downloader.model.DownloadProgress.formatCleanMetric(
+            downloadedBytes = 15 * 1024 * 1024L,
+            totalBytes = 60 * 1024 * 1024L,
+            progressFraction = 0.25f
+        )
+        assertTrue(knownTotal.contains("15 MB / ~60 MB"))
+        assertTrue(knownTotal.contains("25%"))
+        assertFalse(knownTotal.contains("Segment"))
+
+        // Streaming without fixed size
+        val streaming = ir.ali0003.downloader.downloader.model.DownloadProgress.formatCleanMetric(
+            downloadedBytes = 22 * 1024 * 1024L,
+            totalBytes = 0L,
+            progressFraction = 0.50f
+        )
+        assertEquals("22 MB  •  50%", streaming)
+        assertFalse(streaming.contains("Segment"))
+    }
 }

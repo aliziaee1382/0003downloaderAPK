@@ -15,6 +15,9 @@ interface ShortcutDao {
     @Query("SELECT * FROM web_shortcuts WHERE slotIndex = :slotIndex LIMIT 1")
     suspend fun getShortcutBySlot(slotIndex: Int): WebShortcutEntity?
 
+    @Query("SELECT * FROM web_shortcuts WHERE url = :url LIMIT 1")
+    suspend fun getShortcutByUrl(url: String): WebShortcutEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertShortcut(shortcut: WebShortcutEntity): Long
 

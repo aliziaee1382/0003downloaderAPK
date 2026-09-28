@@ -10,6 +10,7 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import ir.ali0003.downloader.browser.sniffer.HlsManifestParser
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.downloader.model.DownloadProgress
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -153,37 +154,77 @@ class Media3HlsDownloader(
                 when (state) {
                     Download.STATE_COMPLETED -> {
                         Log.d(TAG, "Media3 HLS download completed for task $taskId")
+                        val actualTotal = if (fixedTotalBytes > 0L) fixedTotalBytes else downloadedBytes
+
+                        // 1. Immediately update Room DB
                         launch(Dispatchers.IO) {
-                            // If user chose public storage (!task.isHidden), merge cached segments into a clean standalone .mp4 container
-                            if (!task.isHidden) {
-                                tryExportHlsCacheToContainer(context, manifestUrl, outputFile)
-                            } else {
-                                // Ensure placeholder output file exists so Vault checks succeed
-                                try {
+                            try {
+                                val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
+                                db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
+                                db.downloadDao().updateProgress(
+                                    id = taskId,
+                                    downloadedBytes = actualTotal,
+                                    totalBytes = actualTotal,
+                                    speedBps = 0L,
+                                    etaSeconds = 0L
+                                )
+                                db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
+                                db.downloadDao().markCompleted(taskId, System.currentTimeMillis())
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Error immediately updating completed status for task $taskId: ${e.message}")
+                            }
+                        }
+
+                        // 2. Immediately emit completion to flow
+                        trySend(
+                            DownloadProgress(
+                                taskId = taskId,
+                                downloadedBytes = actualTotal,
+                                totalBytes = actualTotal,
+                                speedBps = 0L,
+                                etaSeconds = 0L,
+                                isCompleted = true,
+                                explicitProgress = 1.0f
+                            )
+                        )
+                        close()
+
+                        // 3. Execute the remuxing/stitching logic inside a non-blocking background scope
+                        CoroutineScope(Dispatchers.IO).launch {
+                            try {
+                                if (!task.isHidden) {
+                                    tryExportHlsCacheToContainer(context, manifestUrl, outputFile)
+                                } else {
+                                    // Ensure placeholder output file exists so Vault checks succeed
                                     if (!outputFile.exists()) {
                                         outputFile.parentFile?.mkdirs()
                                         outputFile.writeText("MEDIA3_OFFLINE_CACHE_COMPLETED")
                                     }
-                                } catch (_: Exception) {}
-                            }
+                                }
 
-                            val actualSize = if (outputFile.exists() && outputFile.length() > 1024L) {
-                                outputFile.length()
-                            } else {
-                                downloadedBytes.coerceAtLeast(1024L)
-                            }
+                                if (outputFile.exists() && outputFile.length() > 0L) {
+                                    val finalSize = outputFile.length()
+                                    try {
+                                        val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
+                                        db.downloadDao().updateProgress(taskId, finalSize, finalSize, 0L, 0L)
+                                        db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
+                                    } catch (_: Exception) {}
 
-                            trySend(
-                                DownloadProgress(
-                                    taskId = taskId,
-                                    downloadedBytes = actualSize,
-                                    totalBytes = actualSize,
-                                    speedBps = 0L,
-                                    etaSeconds = 0L,
-                                    isCompleted = true
-                                )
-                            )
-                            close()
+                                    if (!task.isHidden) {
+                                        try {
+                                            android.media.MediaScannerConnection.scanFile(
+                                                context,
+                                                arrayOf(outputFile.absolutePath),
+                                                arrayOf("video/mp4")
+                                            ) { path, uri ->
+                                                Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
+                                            }
+                                        } catch (_: Exception) {}
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Background remux error for task $taskId: ${e.message}", e)
+                            }
                         }
                     }
                     Download.STATE_FAILED -> {

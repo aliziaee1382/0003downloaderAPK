@@ -78,6 +78,21 @@ fun ActiveDownloadsScreen(
 ) {
     var showManualDialog by remember { mutableStateOf(false) }
 
+    // Filter active items strictly: any task with status COMPLETED or progress >= 1.0f immediately vacates the active screen
+    val activeTasks = remember(downloads, progressMap) {
+        downloads.filter { task ->
+            val liveProgress = progressMap[task.id]
+            val effectiveProgress = liveProgress?.progress ?: task.progress
+            val isCompleted = task.status == DownloadStatus.COMPLETED ||
+                    liveProgress?.isCompleted == true ||
+                    effectiveProgress >= 1.0f
+            val isActiveStatus = task.status == DownloadStatus.DOWNLOADING ||
+                    task.status == DownloadStatus.QUEUED ||
+                    task.status == DownloadStatus.PAUSED
+            isActiveStatus && !isCompleted
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -99,7 +114,7 @@ fun ActiveDownloadsScreen(
             )
         }
 
-        if (downloads.isEmpty()) {
+        if (activeTasks.isEmpty()) {
             EmptyStateQueueView(
                 icon = Icons.Default.ArrowDownward,
                 title = "No Active Downloads",
@@ -111,7 +126,7 @@ fun ActiveDownloadsScreen(
                 contentPadding = PaddingValues(bottom = 80.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                items(downloads, key = { it.id }) { task ->
+                items(activeTasks, key = { it.id }) { task ->
                     val liveProgress = progressMap[task.id]
                     ActiveDownloadTaskCard(
                         task = task,
@@ -248,16 +263,14 @@ fun ActiveDownloadTaskCard(
                 // Size, Speed & ETA
                 Column {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val sizeText = if (totalBytes > 0L) {
-                            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ${DownloadTaskEntity.formatFileSize(totalBytes)}"
-                        } else if (liveProgress != null && liveProgress.totalSegments > 0) {
-                            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} (Segment ${liveProgress.currentSegment}/${liveProgress.totalSegments})"
-                        } else {
-                            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ..."
-                        }
+                        val cleanProgressText = DownloadProgress.formatCleanMetric(
+                            downloadedBytes = downloadedBytes,
+                            totalBytes = totalBytes,
+                            progressFraction = progress
+                        )
 
                         Text(
-                            text = sizeText,
+                            text = cleanProgressText,
                             color = GlassTheme.colors.textSecondary,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium

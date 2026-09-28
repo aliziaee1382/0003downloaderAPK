@@ -134,8 +134,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _bookmarks = MutableStateFlow<List<BrowserBookmark>>(
         listOf(
             BrowserBookmark("YouTube", "https://m.youtube.com"),
-            BrowserBookmark("Instagram", "https://www.instagram.com"),
-            BrowserBookmark("Mux HLS Test", "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8")
+            BrowserBookmark("XNXX", "https://www.xnxx.com/video-18uo6v0d/fucking_sexy_milf"),
+            BrowserBookmark("Pornhub", "https://www.pornhub.com/view_video.php?viewkey=ph57ab1c79e33b5"),
+            BrowserBookmark("Instagram", "https://www.instagram.com")
         )
     )
     val bookmarks: StateFlow<List<BrowserBookmark>> = _bookmarks.asStateFlow()

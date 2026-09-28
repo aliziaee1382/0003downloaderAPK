@@ -49,17 +49,50 @@ class ShortcutRepositoryImpl(
     }
 
     override suspend fun initializeDefaultPresetsIfEmpty() {
-        val count = shortcutDao.getShortcutCount()
-        if (count == 0) {
-            // Default Preset: Only "YouTube" is preloaded as the initial default shortcut
-            val defaultPreset = WebShortcutEntity(
-                id = 0L,
-                slotIndex = 0,
-                title = "YouTube",
-                url = "https://www.youtube.com",
-                primaryColorHex = 0xFFFF0000
+        // Slot 0: YouTube
+        val existingSlot0 = shortcutDao.getShortcutBySlot(0)
+        if (existingSlot0 == null) {
+            shortcutDao.insertShortcut(
+                WebShortcutEntity(
+                    id = 0L,
+                    slotIndex = 0,
+                    title = "YouTube",
+                    url = "https://www.youtube.com",
+                    primaryColorHex = 0xFFFF0000
+                )
             )
-            shortcutDao.insertShortcut(defaultPreset)
+        }
+
+        // Slot 1: XNXX
+        val xnxxUrl = "https://www.xnxx.com/video-18uo6v0d/fucking_sexy_milf"
+        val existingXnxx = shortcutDao.getShortcutByUrl(xnxxUrl)
+        if (existingXnxx == null) {
+            val existingSlot1 = shortcutDao.getShortcutBySlot(1)
+            shortcutDao.insertShortcut(
+                WebShortcutEntity(
+                    id = existingSlot1?.id ?: 0L,
+                    slotIndex = 1,
+                    title = "XNXX",
+                    url = xnxxUrl,
+                    primaryColorHex = 0xFF007BFF
+                )
+            )
+        }
+
+        // Slot 2: Pornhub
+        val phUrl = "https://www.pornhub.com/view_video.php?viewkey=ph57ab1c79e33b5"
+        val existingPh = shortcutDao.getShortcutByUrl(phUrl)
+        if (existingPh == null) {
+            val existingSlot2 = shortcutDao.getShortcutBySlot(2)
+            shortcutDao.insertShortcut(
+                WebShortcutEntity(
+                    id = existingSlot2?.id ?: 0L,
+                    slotIndex = 2,
+                    title = "Pornhub",
+                    url = phUrl,
+                    primaryColorHex = 0xFFFF9900
+                )
+            )
         }
     }
 
@@ -88,6 +121,8 @@ class ShortcutRepositoryImpl(
         val lower = "$title $url".lowercase()
         return when {
             lower.contains("youtube") -> 0xFFFF0000
+            lower.contains("pornhub") -> 0xFFFF9900
+            lower.contains("xnxx") -> 0xFF007BFF
             lower.contains("instagram") -> 0xFFE1306C
             lower.contains("aparat") -> 0xFFED145B
             lower.contains("github") -> 0xFF24292E

@@ -37,6 +37,7 @@ interface DownloadRepository {
     suspend fun resumeDownload(id: Long)
     suspend fun retryDownload(id: Long)
     suspend fun markCompleted(id: Long)
+    suspend fun markCompletedWithFile(id: Long, filePath: String, finalBytes: Long)
     suspend fun markFailed(id: Long, errorMessage: String? = null)
     suspend fun setHidden(id: Long, isHidden: Boolean)
     suspend fun deleteDownload(id: Long)
@@ -144,6 +145,10 @@ class DownloadRepositoryImpl(
 
     override suspend fun markCompleted(id: Long) {
         downloadDao.markCompleted(id, System.currentTimeMillis())
+    }
+
+    override suspend fun markCompletedWithFile(id: Long, filePath: String, finalBytes: Long) {
+        downloadDao.markCompletedWithFile(id, filePath, finalBytes, System.currentTimeMillis())
     }
 
     override suspend fun markFailed(id: Long, errorMessage: String?) {

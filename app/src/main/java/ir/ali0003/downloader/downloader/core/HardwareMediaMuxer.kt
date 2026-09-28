@@ -289,9 +289,14 @@ class HardwareMediaMuxer(
         }
 
         return try {
-            val result = completionDeferred.await()
+            val result = kotlinx.coroutines.withTimeoutOrNull(6000L) {
+                completionDeferred.await()
+            } ?: false
             progressActive = false
             progressJob.cancel()
+            if (!result) {
+                try { transformer.cancel() } catch (_: Exception) {}
+            }
             result && outputFile.exists() && outputFile.length() > 0L
         } catch (c: CancellationException) {
             progressActive = false
@@ -508,9 +513,14 @@ class HardwareMediaMuxer(
         }
 
         return try {
-            val result = completionDeferred.await()
+            val result = kotlinx.coroutines.withTimeoutOrNull(6000L) {
+                completionDeferred.await()
+            } ?: false
             progressActive = false
             progressJob.cancel()
+            if (!result) {
+                try { transformer.cancel() } catch (_: Exception) {}
+            }
             result && outputFile.exists() && outputFile.length() > 0L
         } catch (c: CancellationException) {
             progressActive = false

@@ -108,7 +108,48 @@ class AppDownloadService : DownloadService(
             checkAndManagePolling()
 
             val taskId = download.request.id.removePrefix("task_").toLongOrNull() ?: return
-            if (download.state == Download.STATE_FAILED) {
+            if (download.state == Download.STATE_COMPLETED) {
+                lastDownloadStats.remove(taskId)
+                checkAndManagePolling()
+
+                serviceScope.launch {
+                    try {
+                        val db = AppDatabase.getInstance(applicationContext)
+                        val task = db.downloadDao().findDownloadById(taskId)
+                        val totalBytes = if (task != null && task.totalBytes > 0L) task.totalBytes else download.bytesDownloaded
+
+                        // Immediately update Room DB
+                        db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
+                        db.downloadDao().updateProgress(
+                            id = taskId,
+                            downloadedBytes = totalBytes,
+                            totalBytes = totalBytes,
+                            speedBps = 0L,
+                            etaSeconds = 0L
+                        )
+                        db.downloadDao().markCompleted(taskId, System.currentTimeMillis())
+                        Log.i(TAG, "Media3 task $taskId marked COMPLETED in Room DB")
+
+                        // Scan with MediaScannerConnection for the output MP4
+                        task?.let { t ->
+                            val filePath = t.localFilePath?.takeIf { it.isNotBlank() }?.let { java.io.File(it) }
+                            if (filePath != null && filePath.exists() && filePath.length() > 0L && !t.isHidden) {
+                                try {
+                                    android.media.MediaScannerConnection.scanFile(
+                                        applicationContext,
+                                        arrayOf(filePath.absolutePath),
+                                        arrayOf("video/mp4")
+                                    ) { path, uri ->
+                                        Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error finalizing COMPLETED task $taskId in DB: ${e.message}", e)
+                    }
+                }
+            } else if (download.state == Download.STATE_FAILED) {
                 val errorMsg = finalException?.message
                     ?: "Media3 download failed (failure code: ${download.failureReason})"
                 Log.e(TAG, "Media3 task $taskId failed: $errorMsg", finalException)

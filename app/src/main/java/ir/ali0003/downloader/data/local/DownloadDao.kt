@@ -66,8 +66,11 @@ interface DownloadDao {
     @Query("UPDATE download_tasks SET localFilePath = :path WHERE id = :id")
     suspend fun updateLocalFilePath(id: Long, path: String)
 
-    @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, downloadedBytes = totalBytes, speedBps = 0, etaSeconds = 0 WHERE id = :id")
+    @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, speedBps = 0, etaSeconds = 0 WHERE id = :id")
     suspend fun markCompleted(id: Long, completedAt: Long = System.currentTimeMillis())
+
+    @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, localFilePath = :filePath, downloadedBytes = :finalBytes, totalBytes = :finalBytes, speedBps = 0, etaSeconds = 0 WHERE id = :id")
+    suspend fun markCompletedWithFile(id: Long, filePath: String, finalBytes: Long, completedAt: Long = System.currentTimeMillis())
 
     @Query("UPDATE download_tasks SET status = 'FAILED', speedBps = 0, etaSeconds = 0, errorMessage = :errorMessage WHERE id = :id")
     suspend fun markFailed(id: Long, errorMessage: String? = null)

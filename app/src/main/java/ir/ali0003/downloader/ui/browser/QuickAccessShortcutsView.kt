@@ -193,6 +193,16 @@ private fun FilledShortcutSlotItem(
                 shortcut.url.contains("youtu.be", ignoreCase = true)
     }
 
+    val isPornhub = remember(shortcut) {
+        shortcut.title.contains("Pornhub", ignoreCase = true) ||
+                shortcut.url.contains("pornhub.com", ignoreCase = true)
+    }
+
+    val isXnxx = remember(shortcut) {
+        shortcut.title.contains("XNXX", ignoreCase = true) ||
+                shortcut.url.contains("xnxx.com", ignoreCase = true)
+    }
+
     val brandColor = remember(shortcut.primaryColorHex) {
         Color(shortcut.primaryColorHex)
     }
@@ -223,12 +233,17 @@ private fun FilledShortcutSlotItem(
                 .size(54.dp)
                 .clip(CircleShape)
                 .background(
-                    if (isYouTube) {
-                        Brush.verticalGradient(
+                    when {
+                        isYouTube -> Brush.verticalGradient(
                             listOf(Color(0xFFFF0000), Color(0xFFCC0000))
                         )
-                    } else {
-                        Brush.radialGradient(
+                        isPornhub -> Brush.verticalGradient(
+                            listOf(Color(0xFF262626), Color(0xFF141414))
+                        )
+                        isXnxx -> Brush.verticalGradient(
+                            listOf(Color(0xFF007BFF), Color(0xFF004CB3))
+                        )
+                        else -> Brush.radialGradient(
                             listOf(
                                 brandColor.copy(alpha = 0.35f),
                                 GlassTheme.colors.cardBackground.copy(alpha = 0.9f)
@@ -238,28 +253,63 @@ private fun FilledShortcutSlotItem(
                 )
                 .border(
                     width = 1.4.dp,
-                    color = if (isYouTube) Color(0xFFFF4D4D) else brandColor.copy(alpha = 0.75f),
+                    color = when {
+                        isYouTube -> Color(0xFFFF4D4D)
+                        isPornhub -> Color(0xFFFF9900)
+                        isXnxx -> Color(0xFF3399FF)
+                        else -> brandColor.copy(alpha = 0.75f)
+                    },
                     shape = CircleShape
                 ),
             contentAlignment = Alignment.Center
         ) {
-            if (isYouTube) {
-                // Official YouTube Red Play Icon
-                Icon(
-                    imageVector = Icons.Default.PlayArrow,
-                    contentDescription = "YouTube",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
-            } else {
-                // High-Contrast Monogram Letter Avatar
-                Text(
-                    text = monogram,
-                    color = Color.White,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = 0.5.sp
-                )
+            when {
+                isYouTube -> {
+                    // Official YouTube Red Play Icon
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "YouTube",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                isPornhub -> {
+                    // Iconic Pornhub Brand Badge
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFFFF9900))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "PH",
+                            color = Color.Black,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                }
+                isXnxx -> {
+                    // Iconic XNXX Blue Badge
+                    Text(
+                        text = "XN",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.5.sp
+                    )
+                }
+                else -> {
+                    // High-Contrast Monogram Letter Avatar
+                    Text(
+                        text = monogram,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Black,
+                        letterSpacing = 0.5.sp
+                    )
+                }
             }
         }
 

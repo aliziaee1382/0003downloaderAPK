@@ -140,20 +140,30 @@ class DownloadManagerController(
                     )
 
                     if (progress.isCompleted) {
-                        if (!task.isHidden && outputFile.exists()) {
+                        val vaultFileManager = ir.ali0003.downloader.data.vault.VaultFileManager(context, downloadDao)
+                        val finalFile = if (outputFile.exists() && outputFile.length() > 0L) {
+                            outputFile
+                        } else {
+                            vaultFileManager.resolveTaskFile(task) ?: outputFile
+                        }
+                        val finalBytes = if (finalFile.exists() && finalFile.length() > 0L) finalFile.length() else progress.downloadedBytes
+                        val finalPath = finalFile.absolutePath
+
+                        if (!task.isHidden && finalFile.exists()) {
                             try {
                                 android.media.MediaScannerConnection.scanFile(
                                     context,
-                                    arrayOf(outputFile.absolutePath),
+                                    arrayOf(finalPath),
                                     arrayOf("video/mp4")
                                 ) { path, uri ->
                                     Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
                                 }
                             } catch (_: Exception) {}
                         }
-                        val finalBytes = if (outputFile.exists() && outputFile.length() > 0L) outputFile.length() else progress.downloadedBytes
-                        downloadDao.updateProgress(task.id, finalBytes, finalBytes, 0L, 0L)
-                        downloadDao.markCompleted(task.id, System.currentTimeMillis())
+
+                        // Atomically mark completed in Room with the verified physical file path and exact size
+                        downloadDao.markCompletedWithFile(task.id, finalPath, finalBytes)
+
                         val updatedMap = _taskProgressMap.value.toMutableMap()
                         updatedMap.remove(task.id)
                         _taskProgressMap.value = updatedMap
