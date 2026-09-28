@@ -210,7 +210,7 @@ class VideoSnifferEngine(
         }
 
         @JavascriptInterface
-        fun onMediaDefinitionsFound(json: String?) {
+        fun processMediaDefinitions(json: String?) {
             if (json.isNullOrBlank()) return
             mainHandler.post {
                 try {
@@ -224,9 +224,14 @@ class VideoSnifferEngine(
                         userAgent = userAgent
                     )
                 } catch (e: Exception) {
-                    android.util.Log.e("VideoSnifferEngine", "Error handling onMediaDefinitionsFound: ${e.message}", e)
+                    android.util.Log.e("VideoSnifferEngine", "Error handling processMediaDefinitions: ${e.message}", e)
                 }
             }
+        }
+
+        @JavascriptInterface
+        fun onMediaDefinitionsFound(json: String?) {
+            processMediaDefinitions(json)
         }
     }
 
@@ -1245,7 +1250,7 @@ class VideoSnifferEngine(
     companion object {
         const val JS_BRIDGE_NAME = "AndroidVideoSniffer"
 
-        const val PORNHUB_FLASHVARS_EXTRACTOR_JS = "javascript:(function(){ try { var k = Object.keys(window).find(function(key){ return key.indexOf('flashvars') !== -1; }); if (k && window[k].mediaDefinitions) { window.AndroidBridge.onMediaDefinitionsFound(JSON.stringify(window[k].mediaDefinitions)); } } catch(e){} })();"
+        const val PORNHUB_FLASHVARS_EXTRACTOR_JS = "javascript:(function(){ try { var fKey = Object.keys(window).find(function(k){ return k.indexOf('flashvars') !== -1; }); if (fKey && window[fKey] && window[fKey].mediaDefinitions) { window.AndroidBridge.processMediaDefinitions(JSON.stringify(window[fKey].mediaDefinitions)); } } catch(e){} })();"
 
         val DOM_SNIFFER_JS = """
             (function() {
@@ -1322,11 +1327,13 @@ class VideoSnifferEngine(
 
                 function scanPlayerConfigs() {
                     try {
-                        var k = Object.keys(window).find(function(key){ return key.indexOf('flashvars') !== -1; });
-                        if (k && window[k] && window[k].mediaDefinitions) {
+                        var fKey = Object.keys(window).find(function(k){ return k.indexOf('flashvars') !== -1; });
+                        if (fKey && window[fKey] && window[fKey].mediaDefinitions) {
                             var bridge = window.AndroidBridge || window.AndroidVideoSniffer;
-                            if (bridge && typeof bridge.onMediaDefinitionsFound === 'function') {
-                                bridge.onMediaDefinitionsFound(JSON.stringify(window[k].mediaDefinitions));
+                            if (bridge && typeof bridge.processMediaDefinitions === 'function') {
+                                bridge.processMediaDefinitions(JSON.stringify(window[fKey].mediaDefinitions));
+                            } else if (bridge && typeof bridge.onMediaDefinitionsFound === 'function') {
+                                bridge.onMediaDefinitionsFound(JSON.stringify(window[fKey].mediaDefinitions));
                             }
                         }
                     } catch(e) {}
@@ -1425,13 +1432,17 @@ class VideoSnifferEngine(
                     var origPlay = HTMLMediaElement.prototype.play;
                     HTMLMediaElement.prototype.play = function() {
                         scanElement(this);
+                        scanPlayerConfigs();
                         return origPlay.apply(this, arguments);
                     };
                     var origLoad = HTMLMediaElement.prototype.load;
                     HTMLMediaElement.prototype.load = function() {
                         scanElement(this);
+                        scanPlayerConfigs();
                         return origLoad.apply(this, arguments);
                     };
+                    document.addEventListener('click', function() { scanPlayerConfigs(); }, true);
+                    document.addEventListener('touchend', function() { scanPlayerConfigs(); }, true);
                 } catch(e) {}
 
                 // 3. Lightweight periodic scan that stops after 10 iterations to preserve renderer resources

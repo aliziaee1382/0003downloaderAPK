@@ -1,5 +1,7 @@
 package ir.ali0003.downloader.downloader.model
 
+import java.text.DecimalFormat
+
 data class DownloadProgress(
     val taskId: Long,
     val downloadedBytes: Long,
@@ -24,6 +26,9 @@ data class DownloadProgress(
             0.0f
         }
 
+    val formattedMetricProgress: String
+        get() = formatCleanMetric(downloadedBytes, totalBytes, progress)
+
     val formattedEta: String
         get() {
             if (isCompleted) return "Done"
@@ -39,4 +44,18 @@ data class DownloadProgress(
                 String.format("%ds", seconds)
             }
         }
+
+    companion object {
+        fun formatCleanMetric(downloadedBytes: Long, totalBytes: Long, progressFraction: Float): String {
+            val df = DecimalFormat("#,##0.#")
+            val downloadedMB = df.format(downloadedBytes.toDouble() / (1024.0 * 1024.0))
+            val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
+            return if (totalBytes > 0L) {
+                val totalMB = df.format(totalBytes.toDouble() / (1024.0 * 1024.0))
+                "$downloadedMB MB / ~$totalMB MB  •  $percentage%"
+            } else {
+                "$downloadedMB MB  •  $percentage%"
+            }
+        }
+    }
 }

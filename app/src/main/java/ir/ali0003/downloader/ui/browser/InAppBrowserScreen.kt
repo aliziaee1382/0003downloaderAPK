@@ -390,6 +390,15 @@ fun InAppBrowserScreen(
                                         "AndroidBridge"
                                     )
 
+                                    setOnTouchListener { _, event ->
+                                        if (event.action == android.view.MotionEvent.ACTION_UP) {
+                                            try {
+                                                evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                                            } catch (_: Exception) {}
+                                        }
+                                        false
+                                    }
+
                                     webViewClient = object : WebViewClient() {
                                         override fun shouldInterceptRequest(
                                             view: WebView?,

@@ -151,7 +151,12 @@ class DownloadManagerController(
                                 }
                             } catch (_: Exception) {}
                         }
+                        val finalBytes = if (outputFile.exists() && outputFile.length() > 0L) outputFile.length() else progress.downloadedBytes
+                        downloadDao.updateProgress(task.id, finalBytes, finalBytes, 0L, 0L)
                         downloadDao.markCompleted(task.id, System.currentTimeMillis())
+                        val updatedMap = _taskProgressMap.value.toMutableMap()
+                        updatedMap.remove(task.id)
+                        _taskProgressMap.value = updatedMap
                         activeJobs.remove(task.id)
                     } else if (progress.isFailed) {
                         Log.e(TAG, "Task ${task.id} failed: ${progress.errorMessage}")

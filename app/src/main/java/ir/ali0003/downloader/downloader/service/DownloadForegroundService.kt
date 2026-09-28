@@ -163,15 +163,11 @@ class DownloadForegroundService : Service() {
         }
         lastNotificationUpdateTime = now
 
-        val sizeInfo = if (totalBytes > 0L) {
-            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} / ${DownloadTaskEntity.formatFileSize(totalBytes)} ($progressPercent%)"
-        } else if (totalSegments > 0) {
-            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} (Segment $currentSegment/$totalSegments)"
-        } else if (downloadedBytes > 0L) {
-            "${DownloadTaskEntity.formatFileSize(downloadedBytes)} ($progressPercent%)"
-        } else {
-            "$progressPercent%"
-        }
+        val sizeInfo = ir.ali0003.downloader.downloader.model.DownloadProgress.formatCleanMetric(
+            downloadedBytes = downloadedBytes,
+            totalBytes = totalBytes,
+            progressFraction = progressPercent / 100f
+        )
 
         val content = buildString {
             append(sizeInfo)

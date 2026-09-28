@@ -191,10 +191,12 @@ class HlsSegmentDownloader(
                 Log.d(TAG, "Remuxing HLS raw stream (${workingFile.length()} bytes) to MP4 container: ${outputFile.name}")
                 val hardwareMuxer = HardwareMediaMuxer(context)
                 val remuxSuccess = try {
-                    hardwareMuxer.remuxSingleStreamToMp4(
-                        inputFile = workingFile,
-                        outputFile = outputFile
-                    )
+                    kotlinx.coroutines.withTimeoutOrNull(6000L) {
+                        hardwareMuxer.remuxSingleStreamToMp4(
+                            inputFile = workingFile,
+                            outputFile = outputFile
+                        )
+                    } ?: false
                 } catch (e: Exception) {
                     Log.w(TAG, "Hardware remuxing threw exception: ${e.message}, falling back to direct copy")
                     false
@@ -210,6 +212,12 @@ class HlsSegmentDownloader(
                     } else {
                         workingFile.delete()
                     }
+                }
+            } else if (workingFile.exists()) {
+                if (!outputFile.exists() || outputFile.length() == 0L) {
+                    workingFile.renameTo(outputFile)
+                } else {
+                    workingFile.delete()
                 }
             }
 
