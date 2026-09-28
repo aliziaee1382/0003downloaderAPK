@@ -83,9 +83,12 @@ fun ActiveDownloadsScreen(
         downloads.filter { task ->
             val liveProgress = progressMap[task.id]
             val effectiveProgress = liveProgress?.progress ?: task.progress
+            val allSegmentsRetrieved = (liveProgress?.totalSegments ?: 0) > 0 &&
+                    (liveProgress?.currentSegment ?: 0) >= (liveProgress?.totalSegments ?: 0)
             val isCompleted = task.status == DownloadStatus.COMPLETED ||
                     liveProgress?.isCompleted == true ||
-                    effectiveProgress >= 1.0f
+                    effectiveProgress >= 1.0f ||
+                    allSegmentsRetrieved
             val isActiveStatus = task.status == DownloadStatus.DOWNLOADING ||
                     task.status == DownloadStatus.QUEUED ||
                     task.status == DownloadStatus.PAUSED

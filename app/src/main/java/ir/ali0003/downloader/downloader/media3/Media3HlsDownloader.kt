@@ -119,6 +119,8 @@ class Media3HlsDownloader(
         var lastDownloadedBytes = 0L
         var lastTime = System.currentTimeMillis()
 
+        var pollerJob: kotlinx.coroutines.Job? = null
+
         // 2. Register listener on DownloadManager
         val listener = object : DownloadManager.Listener {
             override fun onDownloadChanged(
@@ -154,42 +156,10 @@ class Media3HlsDownloader(
                 when (state) {
                     Download.STATE_COMPLETED -> {
                         Log.d(TAG, "Media3 HLS download completed for task $taskId")
+                        pollerJob?.cancel()
+
                         val actualTotal = if (fixedTotalBytes > 0L) fixedTotalBytes else downloadedBytes
 
-                        // 1. Immediately update Room DB
-                        launch(Dispatchers.IO) {
-                            try {
-                                val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
-                                db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
-                                db.downloadDao().updateProgress(
-                                    id = taskId,
-                                    downloadedBytes = actualTotal,
-                                    totalBytes = actualTotal,
-                                    speedBps = 0L,
-                                    etaSeconds = 0L
-                                )
-                                db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
-                                db.downloadDao().markCompleted(taskId, System.currentTimeMillis())
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error immediately updating completed status for task $taskId: ${e.message}")
-                            }
-                        }
-
-                        // 2. Immediately emit completion to flow
-                        trySend(
-                            DownloadProgress(
-                                taskId = taskId,
-                                downloadedBytes = actualTotal,
-                                totalBytes = actualTotal,
-                                speedBps = 0L,
-                                etaSeconds = 0L,
-                                isCompleted = true,
-                                explicitProgress = 1.0f
-                            )
-                        )
-                        close()
-
-                        // 3. Execute the remuxing/stitching logic inside a non-blocking background scope
                         CoroutineScope(Dispatchers.IO).launch {
                             try {
                                 if (!task.isHidden) {
@@ -202,28 +172,63 @@ class Media3HlsDownloader(
                                     }
                                 }
 
-                                if (outputFile.exists() && outputFile.length() > 0L) {
-                                    val finalSize = outputFile.length()
-                                    try {
-                                        val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
-                                        db.downloadDao().updateProgress(taskId, finalSize, finalSize, 0L, 0L)
-                                        db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
-                                    } catch (_: Exception) {}
-
-                                    if (!task.isHidden) {
-                                        try {
-                                            android.media.MediaScannerConnection.scanFile(
-                                                context,
-                                                arrayOf(outputFile.absolutePath),
-                                                arrayOf("video/mp4")
-                                            ) { path, uri ->
-                                                Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
-                                            }
-                                        } catch (_: Exception) {}
-                                    }
+                                val finalSize = if (outputFile.exists() && outputFile.length() > 0L) {
+                                    outputFile.length()
+                                } else {
+                                    actualTotal
                                 }
+
+                                val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
+                                db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
+                                db.downloadDao().updateProgress(taskId, finalSize, finalSize, 0L, 0L)
+                                db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
+                                db.downloadDao().markCompleted(taskId, System.currentTimeMillis())
+
+                                if (!task.isHidden && outputFile.exists() && outputFile.length() > 0L) {
+                                    try {
+                                        android.media.MediaScannerConnection.scanFile(
+                                            context,
+                                            arrayOf(outputFile.absolutePath),
+                                            arrayOf("video/mp4")
+                                        ) { path, uri ->
+                                            Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+
+                                trySend(
+                                    DownloadProgress(
+                                        taskId = taskId,
+                                        downloadedBytes = finalSize,
+                                        totalBytes = finalSize,
+                                        speedBps = 0L,
+                                        etaSeconds = 0L,
+                                        isCompleted = true,
+                                        explicitProgress = 1.0f
+                                    )
+                                )
+                                close()
                             } catch (e: Exception) {
-                                Log.e(TAG, "Background remux error for task $taskId: ${e.message}", e)
+                                Log.e(TAG, "Error finalizing Media3 HLS task $taskId: ${e.message}", e)
+                                try {
+                                    val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
+                                    db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
+                                    db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
+                                    db.downloadDao().markCompleted(taskId, System.currentTimeMillis())
+                                } catch (_: Exception) {}
+
+                                trySend(
+                                    DownloadProgress(
+                                        taskId = taskId,
+                                        downloadedBytes = actualTotal,
+                                        totalBytes = actualTotal,
+                                        speedBps = 0L,
+                                        etaSeconds = 0L,
+                                        isCompleted = true,
+                                        explicitProgress = 1.0f
+                                    )
+                                )
+                                close()
                             }
                         }
                     }
@@ -280,7 +285,7 @@ class Media3HlsDownloader(
         downloadManager.addListener(listener)
 
         // Periodic polling fallback to guarantee smooth UI progress even if onDownloadChanged is throttled
-        val pollerJob = launch {
+        pollerJob = launch {
             while (isActive) {
                 delay(500)
                 try {
@@ -317,7 +322,7 @@ class Media3HlsDownloader(
         }
 
         awaitClose {
-            pollerJob.cancel()
+            pollerJob?.cancel()
             downloadManager.removeListener(listener)
         }
     }
@@ -437,47 +442,31 @@ class Media3HlsDownloader(
                 } else emptyList()
             } else emptyList()
 
-            Log.d(TAG, "Exporting HLS: ${videoSegmentUrls.size} video segments, ${audioSegmentUrls.size} audio segments to ${outputFile.name}")
+            Log.d(TAG, "Exporting HLS: ${videoSegmentUrls.size} video segments directly to ${outputFile.name}")
 
-            val hardwareMuxer = ir.ali0003.downloader.downloader.core.HardwareMediaMuxer.getInstance(context)
-
-            if (audioSegmentUrls.isNotEmpty()) {
-                // Separate video and audio tracks -> download scratch files and mux
-                val rawVideo = File(scratchDir, "raw_video.ts")
-                val rawAudio = File(scratchDir, "raw_audio.ts")
-
-                writeSegmentsToFile(cacheDataSource, videoSegmentUrls, rawVideo)
-                writeSegmentsToFile(cacheDataSource, audioSegmentUrls, rawAudio)
-
-                val muxSuccess = hardwareMuxer.muxAudioAndVideo(rawVideo, rawAudio, outputFile)
-                if (!muxSuccess || !outputFile.exists() || outputFile.length() == 0L) {
-                    Log.w(TAG, "Audio+Video mux failed, falling back to direct remux of video stream")
-                    hardwareMuxer.remuxSingleStreamToMp4(rawVideo, outputFile)
-                }
+            val destFile = if (outputFile.name.endsWith(".mp4", ignoreCase = true)) {
+                File(outputFile.parentFile, outputFile.name.removeSuffix(".mp4").removeSuffix(".MP4") + ".ts")
+            } else if (!outputFile.name.endsWith(".ts", ignoreCase = true)) {
+                File(outputFile.parentFile, "${outputFile.name}.ts")
             } else {
-                // Multiplexed single stream (e.g. standard MPEG-TS)
-                val rawCombined = File(scratchDir, "raw_combined.ts")
-                writeSegmentsToFile(cacheDataSource, videoSegmentUrls, rawCombined)
+                outputFile
+            }
 
-                val remuxSuccess = hardwareMuxer.remuxSingleStreamToMp4(rawCombined, outputFile)
-                if (!remuxSuccess || !outputFile.exists() || outputFile.length() == 0L) {
-                    Log.w(TAG, "Single stream hardware remux failed, keeping raw combined file if valid")
-                    if (rawCombined.exists() && rawCombined.length() > 0L) {
-                        rawCombined.copyTo(outputFile, overwrite = true)
-                    }
-                }
+            writeSegmentsToFile(cacheDataSource, videoSegmentUrls, destFile)
+            if (destFile.absolutePath != outputFile.absolutePath && destFile.exists() && destFile.length() > 0L) {
+                destFile.copyTo(outputFile, overwrite = true)
             }
 
             if (outputFile.exists() && outputFile.length() > 1024L) {
-                Log.i(TAG, "Successfully remuxed HLS to MP4 container: ${outputFile.absolutePath} (${outputFile.length()} bytes)")
-                // Notify Android MediaStore so Gallery, VLC, and MX Player index it immediately
+                Log.i(TAG, "Successfully exported HLS stream: ${outputFile.absolutePath} (${outputFile.length()} bytes)")
+                val mimeType = if (outputFile.name.endsWith(".ts", ignoreCase = true)) "video/mp2t" else "video/mp4"
                 try {
                     android.media.MediaScannerConnection.scanFile(
                         context,
                         arrayOf(outputFile.absolutePath),
-                        arrayOf("video/mp4")
+                        arrayOf(mimeType)
                     ) { path, uri ->
-                        Log.d(TAG, "MediaScanner indexed remuxed HLS file: $path -> $uri")
+                        Log.d(TAG, "MediaScanner indexed exported HLS file: $path -> $uri")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "MediaScannerConnection error: ${e.message}")

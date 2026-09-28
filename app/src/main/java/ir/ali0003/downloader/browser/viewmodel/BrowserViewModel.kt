@@ -151,6 +151,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _selectedMedia = MutableStateFlow<SniffedMediaItem?>(null)
     val selectedMedia: StateFlow<SniffedMediaItem?> = _selectedMedia.asStateFlow()
 
+    // Centralized deduplicated & sorted video qualities
+    private val _detectedVideoQualities = MutableStateFlow<List<VideoQualityOption>>(emptyList())
+    val detectedVideoQualities: StateFlow<List<VideoQualityOption>> = _detectedVideoQualities.asStateFlow()
+
     private val _saveToVault = MutableStateFlow(false)
     val saveToVault: StateFlow<Boolean> = _saveToVault.asStateFlow()
 
@@ -163,8 +167,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             val current = _sniffedMediaList.value
             val hasRichNativeMedia = current.any { it.qualities.any { q -> q.isYoutubeDl } }
             if (!hasRichNativeMedia) {
-                _sniffedMediaList.value = listOf(detectedCanonical)
-                _selectedMedia.value = detectedCanonical
+                val deduplicatedQualities = deduplicateAndSortQualities(detectedCanonical.qualities)
+                val cleanCanonical = detectedCanonical.copy(qualities = deduplicatedQualities)
+                _detectedVideoQualities.value = deduplicatedQualities
+                _sniffedMediaList.value = listOf(cleanCanonical)
+                _selectedMedia.value = cleanCanonical
             }
         }
     }
@@ -292,11 +299,156 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _isExtractingNativeMedia.value = false
         _sniffedMediaList.value = emptyList()
         _selectedMedia.value = null
+        _detectedVideoQualities.value = emptyList()
         snifferEngine.resetSession()
     }
 
     fun selectMedia(item: SniffedMediaItem?) {
-        _selectedMedia.value = item
+        if (item != null) {
+            val deduplicated = deduplicateAndSortQualities(item.qualities)
+            val cleanItem = item.copy(qualities = deduplicated)
+            _detectedVideoQualities.value = deduplicated
+            _selectedMedia.value = cleanItem
+        } else {
+            _selectedMedia.value = null
+            _detectedVideoQualities.value = emptyList()
+        }
+    }
+
+    /**
+     * Unified deduplication and sorting for video qualities:
+     * - Group by standard resolution height (e.g. 1080p, 720p, 480p, 360p, 240p).
+     * - When combining items from JavaScript bridge (onMediaDefinitionsFound) and network sniffing (HlsManifestParser):
+     *   Prioritizes direct Progressive MP4 for faster and lighter downloading; falls back to distinct adaptive HLS renditions.
+     * - Sorts the finalized quality list in descending order of resolution (1080p -> 720p -> 480p -> 240p).
+     */
+    fun deduplicateAndSortQualities(
+        rawQualities: List<VideoQualityOption>,
+        prioritizeDirectMp4: Boolean = true
+    ): List<VideoQualityOption> {
+        if (rawQualities.isEmpty()) return emptyList()
+
+        // 1. Separate Audio and Video
+        val audioOptions = rawQualities.filter {
+            it.formatTag.contains("AUDIO", ignoreCase = true) ||
+                    it.resolution.contains("Audio", ignoreCase = true) ||
+                    it.label.contains("Audio", ignoreCase = true)
+        }
+        val videoOptions = rawQualities.filterNot {
+            it.formatTag.contains("AUDIO", ignoreCase = true) ||
+                    it.resolution.contains("Audio", ignoreCase = true) ||
+                    it.label.contains("Audio", ignoreCase = true)
+        }
+
+        // 2. Filter out invalid/zero-length or preview/ad items
+        val validVideos = videoOptions.filter { opt ->
+            val u = opt.url.lowercase()
+            opt.url.isNotBlank() &&
+                    !opt.url.startsWith("blob:") &&
+                    !opt.url.startsWith("data:") &&
+                    !u.contains("doubleclick") &&
+                    !u.contains("/ads/") &&
+                    !u.contains("googlesyndication") &&
+                    !u.contains("adnxs") &&
+                    !u.contains("preroll")
+        }
+
+        // 3. Group by resolution height (e.g. 2160, 1440, 1080, 720, 480, 360, 240)
+        val groupedByTier = validVideos.groupBy { it.getResolutionHeight() }
+        val deduplicatedVideos = mutableListOf<VideoQualityOption>()
+
+        for ((height, optionsInTier) in groupedByTier) {
+            val mp4Candidate = optionsInTier.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) }
+                .maxWithOrNull(
+                    compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                )
+            val hlsCandidate = optionsInTier.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) }
+                .maxWithOrNull(
+                    compareBy<VideoQualityOption> { it.bandwidthBps }
+                        .thenBy { it.estimatedSizeBytes }
+                )
+
+            if (prioritizeDirectMp4) {
+                if (mp4Candidate != null) {
+                    deduplicatedVideos.add(standardizeOptionLabel(mp4Candidate, height, "MP4"))
+                } else if (hlsCandidate != null) {
+                    deduplicatedVideos.add(standardizeOptionLabel(hlsCandidate, height, "HLS"))
+                } else {
+                    optionsInTier.firstOrNull()?.let {
+                        deduplicatedVideos.add(standardizeOptionLabel(it, height, it.formatTag))
+                    }
+                }
+            } else {
+                if (mp4Candidate != null && hlsCandidate != null) {
+                    deduplicatedVideos.add(standardizeOptionLabel(mp4Candidate, height, "MP4"))
+                    deduplicatedVideos.add(standardizeOptionLabel(hlsCandidate, height, "HLS"))
+                } else if (mp4Candidate != null) {
+                    deduplicatedVideos.add(standardizeOptionLabel(mp4Candidate, height, "MP4"))
+                } else if (hlsCandidate != null) {
+                    deduplicatedVideos.add(standardizeOptionLabel(hlsCandidate, height, "HLS"))
+                } else {
+                    optionsInTier.firstOrNull()?.let {
+                        deduplicatedVideos.add(standardizeOptionLabel(it, height, it.formatTag))
+                    }
+                }
+            }
+        }
+
+        // 4. Sort finalized list in descending order of resolution (1080p -> 720p -> 480p -> 240p)
+        val sortedVideos = deduplicatedVideos.sortedWith(
+            compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
+                .thenByDescending { it.bandwidthBps }
+                .thenByDescending { it.estimatedSizeBytes }
+        )
+
+        // 5. Enforce size coherence & append best audio at bottom
+        val coherentVideos = ir.ali0003.downloader.browser.sniffer.HlsManifestParser.enforceSizeCoherence(sortedVideos)
+
+        val bestAudio = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
+
+        return if (bestAudio != null) {
+            val audioPill = bestAudio.copy(
+                label = "Audio Only (MP3)",
+                formatTag = "AUDIO"
+            )
+            coherentVideos + audioPill
+        } else {
+            coherentVideos
+        }
+    }
+
+    private fun standardizeOptionLabel(
+        option: VideoQualityOption,
+        height: Int,
+        format: String
+    ): VideoQualityOption {
+        val tierBadge = when (height) {
+            2160 -> "4K UHD"
+            1440 -> "1440p 2K"
+            1080 -> "1080p HD"
+            720 -> "720p HD"
+            480 -> "480p SD"
+            360 -> "360p SD"
+            240 -> "240p"
+            else -> if (height > 0) "${height}p" else option.cleanResolutionBadge
+        }
+        val cleanRes = when (height) {
+            2160 -> "3840x2160"
+            1440 -> "2560x1440"
+            1080 -> "1920x1080"
+            720 -> "1280x720"
+            480 -> "854x480"
+            360 -> "640x360"
+            240 -> "426x240"
+            else -> option.resolution
+        }
+        val cleanFormat = if (format.contains("HLS", ignoreCase = true) || option.isHlsVariant) "HLS" else "MP4"
+        return option.copy(
+            label = tierBadge,
+            resolution = cleanRes,
+            formatTag = cleanFormat
+        )
     }
 
     fun toggleSaveToVault(enabled: Boolean) {
@@ -334,7 +486,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 }
                 val ext = when {
                     isAudio -> ".mp3"
-                    // When downloaded, HLS segments are merged into standard playable MP4 video
+                    isM3u8 -> ".ts"
                     else -> ".mp4"
                 }
                 val badge = selectedQuality.cleanResolutionBadge.replace(" ", "_")
@@ -342,7 +494,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             } else {
                 val clean = mediaItem.cleanFileName
                 if (clean.endsWith(".m3u8", ignoreCase = true)) {
-                    "${clean.removeSuffix(".m3u8").removeSuffix(".M3U8")}.mp4"
+                    "${clean.removeSuffix(".m3u8").removeSuffix(".M3U8")}.ts"
                 } else {
                     clean
                 }
@@ -414,8 +566,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 fileName = fileName,
                 mimeType = when {
                     isAudio -> "audio/mpeg"
-                    // Saved file is a standard video/mp4 playable by all local players
-                    isM3u8 -> "video/mp4"
+                    isM3u8 -> "video/mp2t"
                     else -> mediaItem.mimeType
                 },
                 totalBytes = totalBytes,

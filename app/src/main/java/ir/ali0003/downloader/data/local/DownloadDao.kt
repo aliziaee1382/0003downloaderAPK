@@ -66,6 +66,9 @@ interface DownloadDao {
     @Query("UPDATE download_tasks SET localFilePath = :path WHERE id = :id")
     suspend fun updateLocalFilePath(id: Long, path: String)
 
+    @Query("UPDATE download_tasks SET localFilePath = :path WHERE id = :id")
+    suspend fun updateDownloadPath(id: Long, path: String)
+
     @Query("UPDATE download_tasks SET status = 'COMPLETED', completedAt = :completedAt, speedBps = 0, etaSeconds = 0 WHERE id = :id")
     suspend fun markCompleted(id: Long, completedAt: Long = System.currentTimeMillis())
 

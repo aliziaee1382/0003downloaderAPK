@@ -580,7 +580,9 @@ private fun InShotQualityCard(
                 }
 
                 // Label & Format Subtitle
-                Column {
+                Column(
+                    modifier = Modifier.weight(1f, fill = false)
+                ) {
                     Text(
                         text = option.label,
                         color = if (isSelected) GlassTheme.colors.textPrimary else GlassTheme.colors.textPrimary.copy(alpha = 0.9f),
@@ -593,22 +595,45 @@ private fun InShotQualityCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = option.formatTag,
-                            color = GlassTheme.colors.textSecondary,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                        // Format Type Badge (MP4 / HLS)
+                        val isHls = option.isHlsVariant || option.formatTag.contains("HLS", ignoreCase = true)
+                        val formatLabel = if (isAudio) "MP3" else if (isHls) "HLS" else "MP4"
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(
+                                    if (isHls) GlassTheme.colors.surfaceGlass
+                                    else GlassTheme.colors.accentGlow.copy(alpha = 0.16f)
+                                )
+                                .border(
+                                    0.6.dp,
+                                    if (isHls) GlassTheme.colors.glassBorder
+                                    else GlassTheme.colors.accentGlow.copy(alpha = 0.4f),
+                                    RoundedCornerShape(4.dp)
+                                )
+                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Text(
+                                text = formatLabel,
+                                color = if (isHls) GlassTheme.colors.textSecondary else GlassTheme.colors.accentGlow,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                         if (option.resolution.isNotBlank() && !isAudio) {
                             Text(
-                                text = "• ${option.resolution}",
+                                text = option.resolution,
                                 color = GlassTheme.colors.textMuted,
-                                fontSize = 10.sp
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
                 }
             }
+
+            Spacer(modifier = Modifier.width(6.dp))
 
             // Right side: Exact file size pill + Instant 1-Tap Download arrow
             Row(
@@ -797,47 +822,72 @@ private fun resolveComprehensiveQualities(item: SniffedMediaItem): List<VideoQua
 }
 
 /**
- * Sort options for sheet, separating video and audio, preserving all declared variants.
+ * Sort options for sheet, grouping by resolution tier and prioritizing direct Progressive MP4,
+ * sorting descending from highest resolution to lowest without duplicate tiers.
  */
 private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): List<VideoQualityOption> {
     if (list.isEmpty()) return emptyList()
 
-    // 1. Deduplication:
-    // Retain ALL declared HLS variants (preserve 1080p, 720p, 480p, 240p, distinct by resolution and bandwidth)
-    // For progressive MP4, deduplicate by clean URL
-    val hlsOptions = list.filter { it.isHlsVariant }.distinctBy {
-        "${it.resolution}_${it.bandwidthBps}_${it.cleanResolutionBadge}_${it.renditionKey ?: it.url}"
+    // 1. Separate audio and video
+    val audioOptions = list.filter {
+        it.formatTag.contains("AUDIO", ignoreCase = true) ||
+                it.resolution.contains("Audio", ignoreCase = true) ||
+                it.label.contains("Audio", ignoreCase = true)
     }
-    val nonHlsOptions = list.filterNot { it.isHlsVariant }
-        .groupBy { it.url.substringBefore('?').substringBefore('#') }
-        .mapNotNull { (_, options) ->
-            options.maxWithOrNull(
+    val videoOptions = list.filterNot {
+        it.formatTag.contains("AUDIO", ignoreCase = true) ||
+                it.resolution.contains("Audio", ignoreCase = true) ||
+                it.label.contains("Audio", ignoreCase = true)
+    }
+
+    // 2. Filter out ad / preview options
+    val validVideos = videoOptions.filter { opt ->
+        val u = opt.url.lowercase()
+        opt.url.isNotBlank() && !opt.url.startsWith("blob:") && !opt.url.startsWith("data:") &&
+                !u.contains("doubleclick") && !u.contains("/ads/") && !u.contains("preroll") &&
+                !u.contains("googlesyndication") && !u.contains("adnxs")
+    }
+
+    // 3. Group by resolution height (e.g. 2160, 1440, 1080, 720, 480, 360, 240)
+    val groupedByHeight = validVideos.groupBy { it.getResolutionHeight() }
+    val deduplicatedVideos = mutableListOf<VideoQualityOption>()
+
+    for ((height, optionsInHeight) in groupedByHeight) {
+        val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) }
+            .maxWithOrNull(
                 compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
                     .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
             )
+        val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) }
+            .maxWithOrNull(
+                compareBy<VideoQualityOption> { it.bandwidthBps }
+                    .thenBy { it.estimatedSizeBytes }
+            )
+
+        val tierBadge = when (height) {
+            2160 -> "4K UHD"
+            1440 -> "1440p 2K"
+            1080 -> "1080p HD"
+            720 -> "720p HD"
+            480 -> "480p SD"
+            360 -> "360p SD"
+            240 -> "240p"
+            else -> if (height > 0) "${height}p" else ""
         }
-    val combinedOptions = hlsOptions + nonHlsOptions
 
-    // 2. Separate audio and video
-    val audioOptions = combinedOptions.filter {
-        it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
-    }
-    val videoOptions = combinedOptions.filterNot {
-        it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
-    }
-
-    // 3. Suppress vague "Direct Stream" if named video options exist
-    val hasNamedVideo = videoOptions.any {
-        it.resolution.isNotBlank() && !it.label.contains("Direct Stream", ignoreCase = true)
-    }
-    val cleanVideos = if (hasNamedVideo) {
-        videoOptions.filterNot { it.label.contains("Direct Stream", ignoreCase = true) && it.resolution.isBlank() }
-    } else {
-        videoOptions
+        if (mp4Candidate != null) {
+            val label = if (tierBadge.isNotBlank()) tierBadge else mp4Candidate.label
+            deduplicatedVideos.add(mp4Candidate.copy(label = label, formatTag = "MP4"))
+        } else if (hlsCandidate != null) {
+            val label = if (tierBadge.isNotBlank()) tierBadge else hlsCandidate.label
+            deduplicatedVideos.add(hlsCandidate.copy(label = label, formatTag = "HLS"))
+        } else {
+            optionsInHeight.firstOrNull()?.let { deduplicatedVideos.add(it) }
+        }
     }
 
-    // 4. Sort descending from highest resolution to lowest, then bandwidth descending
-    val sortedVideos = cleanVideos.sortedWith(
+    // 4. Sort descending from highest resolution to lowest (1080p -> 720p -> 480p -> 240p)
+    val sortedVideos = deduplicatedVideos.sortedWith(
         compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
             .thenByDescending { it.bandwidthBps }
             .thenByDescending { it.estimatedSizeBytes }
@@ -846,7 +896,8 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
     val bestAudio = audioOptions.maxByOrNull { it.estimatedSizeBytes.coerceAtLeast(it.bandwidthBps) }
 
     val combined = if (bestAudio != null) {
-        sortedVideos + bestAudio
+        val audioOpt = bestAudio.copy(label = "Audio Only (MP3)", formatTag = "AUDIO")
+        sortedVideos + audioOpt
     } else {
         sortedVideos
     }

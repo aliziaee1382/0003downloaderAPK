@@ -51,6 +51,17 @@ class VaultFileManager(
             }
         }
 
+    private val publicMoviesDir: File
+        get() {
+            val publicDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+            val appPublicDir = File(publicDir, "0003_Downloader")
+            return if (appPublicDir.exists() || appPublicDir.mkdirs()) {
+                appPublicDir
+            } else {
+                publicDir
+            }
+        }
+
     private val externalFallbackDownloadsDir: File
         get() {
             val dir = File(context.getExternalFilesDir(null), "downloads")
@@ -132,10 +143,12 @@ class VaultFileManager(
      * Also seamlessly resolves legacy tasks that were saved with .m3u8 instead of .mp4 (or vice versa).
      */
     fun resolveTaskFile(task: DownloadTaskEntity): File? {
-        // Fast-path: Check explicit task.localFilePath if recorded
-        task.localFilePath?.takeIf { it.isNotBlank() }?.let { path ->
-            val direct = File(path)
-            if (direct.exists()) return direct
+        // Fast-path: Check explicit task.localFilePath or task.downloadPath if recorded
+        listOfNotNull(task.localFilePath, task.downloadPath).forEach { path ->
+            if (path.isNotBlank()) {
+                val direct = File(path)
+                if (direct.exists()) return direct
+            }
         }
 
         val cleanName = task.fileName.trimStart('.')
@@ -143,14 +156,23 @@ class VaultFileManager(
         val hiddenName = ".$cleanName$VAULT_EXTENSION"
         val hiddenSanitizedName = ".$sanitizedName$VAULT_EXTENSION"
 
-        val altCleanName = when {
-            cleanName.endsWith(".m3u8", ignoreCase = true) -> cleanName.removeSuffix(".m3u8") + ".mp4"
-            cleanName.endsWith(".mp4", ignoreCase = true) -> cleanName.removeSuffix(".mp4") + ".m3u8"
-            else -> null
+        val altNames = mutableListOf<String>()
+        if (cleanName.endsWith(".m3u8", ignoreCase = true)) {
+            altNames.add(cleanName.removeSuffix(".m3u8") + ".ts")
+            altNames.add(cleanName.removeSuffix(".m3u8") + ".mp4")
         }
-        val altHiddenName = altCleanName?.let { ".$it$VAULT_EXTENSION" }
-        val altSanitizedName = altCleanName?.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
-        val altHiddenSanitizedName = altSanitizedName?.let { ".$it$VAULT_EXTENSION" }
+        if (cleanName.endsWith(".mp4", ignoreCase = true)) {
+            altNames.add(cleanName.removeSuffix(".mp4") + ".ts")
+        }
+        if (cleanName.endsWith(".ts", ignoreCase = true)) {
+            altNames.add(cleanName.removeSuffix(".ts") + ".mp4")
+        }
+        if (!cleanName.endsWith(".mp4", ignoreCase = true)) {
+            altNames.add("$cleanName.mp4")
+        }
+        if (!cleanName.endsWith(".ts", ignoreCase = true)) {
+            altNames.add("$cleanName.ts")
+        }
 
         val possiblePaths = mutableListOf(
             File(vaultDir, hiddenName),
@@ -159,6 +181,8 @@ class VaultFileManager(
             File(vaultDir, sanitizedName),
             File(publicDownloadsDir, cleanName),
             File(publicDownloadsDir, sanitizedName),
+            File(publicMoviesDir, cleanName),
+            File(publicMoviesDir, sanitizedName),
             File(externalFallbackDownloadsDir, cleanName),
             File(externalFallbackDownloadsDir, sanitizedName),
             File(context.filesDir, "vault_media/$cleanName"),
@@ -169,21 +193,24 @@ class VaultFileManager(
             File(context.filesDir, sanitizedName)
         )
 
-        if (altCleanName != null) {
-            possiblePaths.add(File(publicDownloadsDir, altCleanName))
-            if (altSanitizedName != null) possiblePaths.add(File(publicDownloadsDir, altSanitizedName))
-            possiblePaths.add(File(vaultDir, altCleanName))
-            if (altSanitizedName != null) possiblePaths.add(File(vaultDir, altSanitizedName))
-            possiblePaths.add(File(context.filesDir, altCleanName))
-            if (altSanitizedName != null) possiblePaths.add(File(context.filesDir, altSanitizedName))
-            possiblePaths.add(File(context.filesDir, "vault_media/$altCleanName"))
-            if (altSanitizedName != null) possiblePaths.add(File(context.filesDir, "vault_media/$altSanitizedName"))
-        }
-        if (altHiddenName != null) {
-            possiblePaths.add(File(vaultDir, altHiddenName))
-            if (altHiddenSanitizedName != null) possiblePaths.add(File(vaultDir, altHiddenSanitizedName))
-            possiblePaths.add(File(context.filesDir, "vault_media/$altHiddenName"))
-            if (altHiddenSanitizedName != null) possiblePaths.add(File(context.filesDir, "vault_media/$altHiddenSanitizedName"))
+        for (alt in altNames.distinct()) {
+            val altSan = alt.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+            val altHid = ".$alt$VAULT_EXTENSION"
+            val altHidSan = ".$altSan$VAULT_EXTENSION"
+            possiblePaths.add(File(publicDownloadsDir, alt))
+            possiblePaths.add(File(publicDownloadsDir, altSan))
+            possiblePaths.add(File(publicMoviesDir, alt))
+            possiblePaths.add(File(publicMoviesDir, altSan))
+            possiblePaths.add(File(vaultDir, alt))
+            possiblePaths.add(File(vaultDir, altSan))
+            possiblePaths.add(File(vaultDir, altHid))
+            possiblePaths.add(File(vaultDir, altHidSan))
+            possiblePaths.add(File(context.filesDir, alt))
+            possiblePaths.add(File(context.filesDir, altSan))
+            possiblePaths.add(File(context.filesDir, "vault_media/$alt"))
+            possiblePaths.add(File(context.filesDir, "vault_media/$altSan"))
+            possiblePaths.add(File(context.filesDir, "vault_media/$altHid"))
+            possiblePaths.add(File(context.filesDir, "vault_media/$altHidSan"))
         }
 
         return possiblePaths.firstOrNull { it.exists() } ?: if (task.isHidden) {

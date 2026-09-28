@@ -261,7 +261,16 @@ class VideoSnifferEngine(
                     ?: obj.optString("url").takeIf { it.isNotBlank() && it != "null" }
                     ?: "").trim()
 
-                if (rawVideoUrl.isBlank()) continue
+                // Sanitize 1: Filter out zero-length, non-http, or internal dummy URLs
+                if (rawVideoUrl.isBlank() || rawVideoUrl.length < 10) continue
+                if (rawVideoUrl.startsWith("blob:") || rawVideoUrl.startsWith("data:") || rawVideoUrl.startsWith("javascript:")) continue
+
+                // Sanitize 2: Filter out advertising preroll video definitions
+                val isAdOrPreroll = format == "ad" || format == "preroll" || format == "midroll" || format == "postroll" ||
+                        obj.optBoolean("isAd", false) || obj.optBoolean("isPreroll", false) ||
+                        isAdOrJunkUrl(rawVideoUrl)
+                if (isAdOrPreroll) continue
+
                 val videoUrl = rawVideoUrl.replace("\\/", "/")
 
                 if (defaultVideoUrl == null || isDefault) {
@@ -326,7 +335,17 @@ class VideoSnifferEngine(
                         240 -> "426x240"
                         else -> if (heightInt > 0) "${(heightInt * 16) / 9}x$heightInt" else ""
                     }
-                    val label = if (heightInt > 0) "${heightInt}p" else q
+                    // Accurately map resolution numbers to standard tier labels
+                    val label = when (heightInt) {
+                        2160 -> "4K UHD"
+                        1440 -> "1440p 2K"
+                        1080 -> "1080p HD"
+                        720 -> "720p HD"
+                        480 -> "480p SD"
+                        360 -> "360p SD"
+                        240 -> "240p"
+                        else -> if (heightInt > 0) "${heightInt}p" else q
+                    }
                     val bandwidthBps = when (heightInt) {
                         2160 -> 15_000_000L
                         1440 -> 8_000_000L
@@ -361,7 +380,16 @@ class VideoSnifferEngine(
 
             val aggregated = synchronized(aggregationLock) {
                 accumulatedHeaders.putAll(fullHeaders)
-                accumulatedRawQualities.addAll(extractedQualities)
+                // Deduplicate incoming options against accumulated to prevent duplicate tiers on repeated taps
+                for (extracted in extractedQualities) {
+                    accumulatedRawQualities.removeAll { existing ->
+                        existing.url == extracted.url ||
+                                (existing.getResolutionHeight() == extracted.getResolutionHeight() &&
+                                        existing.isHlsVariant == extracted.isHlsVariant &&
+                                        existing.getResolutionHeight() > 0)
+                    }
+                    accumulatedRawQualities.add(extracted)
+                }
 
                 val previous = canonicalVideoItem
                 val bestTitle = pickBestTitle(previous?.title, pageTitle, targetUrl)
@@ -1075,34 +1103,36 @@ class VideoSnifferEngine(
             it.formatTag.contains("AUDIO", ignoreCase = true) || it.resolution.contains("Audio", ignoreCase = true)
         }
 
-        // 5. Video Tiers:
-        // For HLS streams: retain all declared video tiers (1080p, 720p, 480p, 240p)
-        // For progressive MP4: group by distinct resolution height and keep highest-bandwidth stream for each tier
-        val distinctVideoTiers = if (isHls || videoOptions.any { it.isHlsVariant }) {
-            val hlsVideo = videoOptions.filter { it.isHlsVariant }
-            val nonHlsVideo = videoOptions.filterNot { it.isHlsVariant }
-                .groupBy { it.getResolutionHeight() }
-                .mapNotNull { (_, optionsInTier) ->
-                    optionsInTier.maxWithOrNull(
-                        compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                            .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
-                    )
-                }
-            hlsVideo + nonHlsVideo
-        } else {
-            videoOptions
-                .groupBy { it.getResolutionHeight() }
-                .mapNotNull { (_, optionsInTier) ->
-                    optionsInTier.maxWithOrNull(
-                        compareBy<VideoQualityOption> { if (!it.isHlsVariant) 1 else 0 }
-                            .thenBy { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                            .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
-                    )
-                }
+        // 5. Video Tiers Grouping & Deduplication:
+        // Group by distinct resolution height.
+        // For each resolution tier: prioritize direct Progressive MP4 for faster and lighter downloading;
+        // fallback to the highest-bandwidth HLS stream for that tier.
+        val deduplicatedVideoTiers = mutableListOf<VideoQualityOption>()
+        val groupedByHeight = videoOptions.groupBy { it.getResolutionHeight() }
+
+        for ((height, optionsInHeight) in groupedByHeight) {
+            val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) }
+                .maxWithOrNull(
+                    compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                )
+            val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) }
+                .maxWithOrNull(
+                    compareBy<VideoQualityOption> { it.bandwidthBps }
+                        .thenBy { it.estimatedSizeBytes }
+                )
+
+            if (mp4Candidate != null) {
+                deduplicatedVideoTiers.add(mp4Candidate)
+            } else if (hlsCandidate != null) {
+                deduplicatedVideoTiers.add(hlsCandidate)
+            } else {
+                optionsInHeight.firstOrNull()?.let { deduplicatedVideoTiers.add(it) }
+            }
         }
 
         // 6. Present a clean, descending list from highest resolution to lowest resolution
-        val sortedCandidates = distinctVideoTiers.sortedWith(
+        val sortedCandidates = deduplicatedVideoTiers.sortedWith(
             compareByDescending<VideoQualityOption> { it.getResolutionHeight() }
                 .thenByDescending { it.bandwidthBps }
                 .thenByDescending { it.estimatedSizeBytes }
@@ -1111,17 +1141,12 @@ class VideoSnifferEngine(
         // Enforce strict size & bandwidth consistency across descending resolutions
         val coherentCandidates = HlsManifestParser.enforceSizeCoherence(sortedCandidates)
 
-        // Retain all declared HLS qualities; for progressive MP4, never allow identical resolutions with same size twice
+        // Final guard against duplicate resolution heights or identical sizes
         val uniqueVideoOptions = mutableListOf<VideoQualityOption>()
         val seenHeights = mutableSetOf<Int>()
         val seenExactSizes = mutableSetOf<Long>()
 
         for (opt in coherentCandidates) {
-            if (opt.isHlsVariant) {
-                // Retain all genuine declared HLS variants (e.g. 1080p, 720p, 480p, 240p)
-                uniqueVideoOptions.add(opt)
-                continue
-            }
             val h = opt.getResolutionHeight()
             if (h > 0 && seenHeights.contains(h)) {
                 continue
@@ -1250,7 +1275,48 @@ class VideoSnifferEngine(
     companion object {
         const val JS_BRIDGE_NAME = "AndroidVideoSniffer"
 
-        const val PORNHUB_FLASHVARS_EXTRACTOR_JS = "javascript:(function(){ try { var fKey = Object.keys(window).find(function(k){ return k.indexOf('flashvars') !== -1; }); if (fKey && window[fKey] && window[fKey].mediaDefinitions) { window.AndroidBridge.processMediaDefinitions(JSON.stringify(window[fKey].mediaDefinitions)); } } catch(e){} })();"
+        const val MEDIA_DEFINITIONS_EXTRACTOR_JS = """javascript:(function(){
+            try {
+                function triggerBridge(defs) {
+                    if (!defs) return;
+                    var jsonStr = typeof defs === 'string' ? defs : JSON.stringify(defs);
+                    if (window.AndroidBridge && typeof window.AndroidBridge.processMediaDefinitions === 'function') {
+                        window.AndroidBridge.processMediaDefinitions(jsonStr);
+                    } else if (window.AndroidVideoSniffer && typeof window.AndroidVideoSniffer.processMediaDefinitions === 'function') {
+                        window.AndroidVideoSniffer.processMediaDefinitions(jsonStr);
+                    }
+                }
+                var fKey = Object.keys(window).find(function(k){ return k.indexOf('flashvars') !== -1; });
+                if (fKey && window[fKey] && window[fKey].mediaDefinitions) {
+                    triggerBridge(window[fKey].mediaDefinitions);
+                    return;
+                }
+                if (window.mediaDefinitions) {
+                    triggerBridge(window.mediaDefinitions);
+                    return;
+                }
+                if (window.player_mp4_seek && Array.isArray(window.player_mp4_seek)) {
+                    triggerBridge(window.player_mp4_seek);
+                    return;
+                }
+                var scripts = document.getElementsByTagName('script');
+                for (var i = 0; i < scripts.length; i++) {
+                    var txt = scripts[i].textContent || '';
+                    if (txt.indexOf('mediaDefinitions') !== -1) {
+                        var m = txt.match(/mediaDefinitions\s*[:=]\s*(\[[^\]]+\])/);
+                        if (m && m[1]) {
+                            try {
+                                var parsed = JSON.parse(m[1]);
+                                triggerBridge(parsed);
+                                return;
+                            } catch (_) {}
+                        }
+                    }
+                }
+            } catch(e){}
+        })();"""
+
+        const val PORNHUB_FLASHVARS_EXTRACTOR_JS = MEDIA_DEFINITIONS_EXTRACTOR_JS
 
         val DOM_SNIFFER_JS = """
             (function() {
@@ -1443,6 +1509,10 @@ class VideoSnifferEngine(
                     };
                     document.addEventListener('click', function() { scanPlayerConfigs(); }, true);
                     document.addEventListener('touchend', function() { scanPlayerConfigs(); }, true);
+                    document.addEventListener('pointerup', function() { scanPlayerConfigs(); }, true);
+                    document.addEventListener('play', function() { scanPlayerConfigs(); }, true);
+                    document.addEventListener('playing', function() { scanPlayerConfigs(); }, true);
+                    window.addEventListener('play', function() { scanPlayerConfigs(); }, true);
                 } catch(e) {}
 
                 // 3. Lightweight periodic scan that stops after 10 iterations to preserve renderer resources

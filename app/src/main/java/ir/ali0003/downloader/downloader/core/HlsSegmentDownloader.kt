@@ -24,13 +24,13 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
 /**
- * Unified, Direct-to-File HLS Stream Downloader & Remuxer:
+ * Unified, Direct-to-File HLS Stream Downloader:
  * 1. Resolves master playlists & media variants using inherited session headers (Cookies, User-Agent, Referer).
- * 2. Downloads declared segments sequentially/concurrently with retry policy (minRetryCount = 5).
+ * 2. Downloads declared segments directly to clean .ts container file without corrupting remuxing.
  * 3. Calculates real-time linear progress strictly by segment count:
  *    progress = (downloadedSegments.toFloat() / totalSegments.toFloat()).coerceIn(0f, 1f)
- * 4. Remuxes segments directly into a clean, standalone .mp4 container using HardwareMediaMuxer.
- * 5. Registers output file via MediaScannerConnection so device Gallery & external players detect it instantly.
+ * 4. Updates Room atomically with file path and COMPLETED status.
+ * 5. Registers output file via MediaScannerConnection with MIME type video/mp2t so device Gallery & external players detect it instantly.
  */
 class HlsSegmentDownloader(
     private val context: Context,
@@ -94,20 +94,21 @@ class HlsSegmentDownloader(
             // Ensure destination directory exists
             outputFile.parentFile?.mkdirs()
 
-            // Working intermediate file
-            val isTargetMp4 = outputFile.name.endsWith(".mp4", ignoreCase = true)
-            val workingFile = if (isTargetMp4) {
-                File(outputFile.parentFile, "${outputFile.name}.raw_stream.ts")
+            // Resolve clean target .ts file directly
+            val targetFile = if (outputFile.name.endsWith(".mp4", ignoreCase = true)) {
+                File(outputFile.parentFile, outputFile.name.removeSuffix(".mp4").removeSuffix(".MP4") + ".ts")
+            } else if (!outputFile.name.endsWith(".ts", ignoreCase = true)) {
+                File(outputFile.parentFile, "${outputFile.name}.ts")
             } else {
                 outputFile
             }
-            if (workingFile.exists()) workingFile.delete()
+            if (targetFile.exists()) targetFile.delete()
 
             var lastEmitTime = 0L
             var lastBytes = 0L
             var lastTime = System.currentTimeMillis()
 
-            workingFile.outputStream().use { fos ->
+            targetFile.outputStream().use { fos ->
                 for (index in 0 until totalSegments) {
                     if (!coroutineContext.isActive) {
                         Log.w(TAG, "HLS download cancelled for task $taskId at segment $index")
@@ -185,59 +186,37 @@ class HlsSegmentDownloader(
                 fos.flush()
             }
 
-            // 2. Automated Container Remuxing:
-            // If the target file is .mp4, remux the raw TS segments into a clean MP4 container
-            if (isTargetMp4 && workingFile.exists() && workingFile.length() > 0L) {
-                Log.d(TAG, "Remuxing HLS raw stream (${workingFile.length()} bytes) to MP4 container: ${outputFile.name}")
-                val hardwareMuxer = HardwareMediaMuxer(context)
-                val remuxSuccess = try {
-                    kotlinx.coroutines.withTimeoutOrNull(6000L) {
-                        hardwareMuxer.remuxSingleStreamToMp4(
-                            inputFile = workingFile,
-                            outputFile = outputFile
-                        )
-                    } ?: false
-                } catch (e: Exception) {
-                    Log.w(TAG, "Hardware remuxing threw exception: ${e.message}, falling back to direct copy")
-                    false
-                }
+            val finalFileSize = if (targetFile.exists() && targetFile.length() > 0L) targetFile.length() else totalDownloadedBytes
 
-                if (remuxSuccess && outputFile.exists() && outputFile.length() > 0L) {
-                    Log.i(TAG, "Remuxing succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
-                    workingFile.delete()
-                } else {
-                    Log.w(TAG, "Remuxing did not produce output, preserving stream directly as fallback")
-                    if (!outputFile.exists() || outputFile.length() == 0L) {
-                        workingFile.renameTo(outputFile)
-                    } else {
-                        workingFile.delete()
-                    }
-                }
-            } else if (workingFile.exists()) {
-                if (!outputFile.exists() || outputFile.length() == 0L) {
-                    workingFile.renameTo(outputFile)
-                } else {
-                    workingFile.delete()
-                }
+            // 1. Immediate State & Room Transition:
+            // Write absolute file path to task.localFilePath, update status atomically to COMPLETED
+            try {
+                val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
+                db.downloadDao().updateLocalFilePath(taskId, targetFile.absolutePath)
+                db.downloadDao().updateDownloadPath(taskId, targetFile.absolutePath)
+                db.downloadDao().updateProgress(taskId, finalFileSize, finalFileSize, 0L, 0L)
+                db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
+                db.downloadDao().markCompletedWithFile(taskId, targetFile.absolutePath, finalFileSize)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error committing completed status in HlsSegmentDownloader: ${e.message}")
             }
 
-            // 3. MediaScanner indexing for public files
-            val finalFileSize = if (outputFile.exists()) outputFile.length() else totalDownloadedBytes
-            if (!task.isHidden && outputFile.exists()) {
+            // 2. Trigger MediaScannerConnection.scanFile with MIME type video/mp2t
+            if (!task.isHidden && targetFile.exists()) {
                 try {
                     MediaScannerConnection.scanFile(
                         context,
-                        arrayOf(outputFile.absolutePath),
-                        arrayOf("video/mp4")
+                        arrayOf(targetFile.absolutePath),
+                        arrayOf("video/mp2t")
                     ) { path, uri ->
-                        Log.d(TAG, "MediaScanner indexed completed HLS video: $path -> $uri")
+                        Log.d(TAG, "MediaScanner indexed completed HLS (.ts) video: $path -> $uri")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "MediaScanner indexing failed: ${e.message}")
                 }
             }
 
-            // 4. Emit final completion
+            // 3. Emit final completion
             emit(
                 DownloadProgress(
                     taskId = taskId,

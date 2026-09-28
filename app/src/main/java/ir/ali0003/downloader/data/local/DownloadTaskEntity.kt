@@ -37,6 +37,9 @@ data class DownloadTaskEntity(
     val completedAt: Long? = null,
     val localFilePath: String? = null
 ) {
+    val downloadPath: String?
+        get() = localFilePath
+
     val progress: Float
         get() = if (totalBytes > 0L) {
             (downloadedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)

@@ -146,39 +146,44 @@ fun InAppVideoPlayerSheet(
     var playbackError by remember { mutableStateOf<String?>(null) }
     var playbackAttempt by remember { mutableIntStateOf(0) } // 0: Local Auto, 1: Local Forced TS, 2: Offline Cache/Stream
 
-    // Check if task localFilePath or resolved file exists as a local file
+    // Check if task localFilePath, downloadPath, or resolved file exists as a local file
     val targetLocalFile = remember(task) {
-        val directPath = task.localFilePath?.takeIf { it.isNotBlank() }
-        if (directPath != null) {
-            val f = File(directPath)
+        val pathsToCheck = listOfNotNull(task.localFilePath, task.downloadPath).filter { it.isNotBlank() }
+        var foundFile: File? = null
+        for (path in pathsToCheck) {
+            val f = File(path)
             if (f.exists() && f.length() > 0L && !isPlaceholderFile(f)) {
-                f
-            } else {
-                resolveLocalTargetFile(context, task, vaultFileManager)
+                foundFile = f
+                break
             }
-        } else {
-            resolveLocalTargetFile(context, task, vaultFileManager)
         }
+        foundFile ?: resolveLocalTargetFile(context, task, vaultFileManager)
     }
     val hasLocalFile = targetLocalFile != null && targetLocalFile.exists() && targetLocalFile.length() > 0L && !isPlaceholderFile(targetLocalFile)
 
-    // Create ExoPlayer instance equipped with CacheDataSourceFactory & DefaultExtractorsFactory
-    // This allows universal playback of:
-    // 1. Standalone local files (file://)
-    // 2. Offline HLS segments stored in Media3 SimpleCache
-    // 3. Online web streams
+    // Create ExoPlayer instance:
+    // STRICT RULE: Completely bypass CacheDataSource.Factory and any network DataSource for completed local files.
+    // Progressive Streaming Fallback is used ONLY for active / non-completed preview tasks.
     val exoPlayer = remember(task.id) {
         val audioAttributes = AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
-        val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
-        ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.registerRequestHeaders(task.url, headers)
 
-        val extractorsFactory = androidx.media3.extractor.DefaultExtractorsFactory()
-            .setConstantBitrateSeekingEnabled(true)
-        val dataSourceFactory = ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.getCacheDataSourceFactory(context, headers)
-        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
+        val mediaSourceFactory = if (hasLocalFile || task.status == ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED) {
+            val defaultDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(defaultDataSourceFactory)
+        } else {
+            val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
+            val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(15000)
+                .setReadTimeoutMs(30000)
+            headers["User-Agent"]?.let { httpDataSourceFactory.setUserAgent(it) }
+            httpDataSourceFactory.setDefaultRequestProperties(headers)
+            val defaultDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context, httpDataSourceFactory)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(defaultDataSourceFactory)
+        }
 
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -216,80 +221,42 @@ fun InAppVideoPlayerSheet(
         }
     }
 
-    // Playback executor supporting seamless multi-stage fallback
+    // Playback executor: Direct local file playback for completed tasks; progressive stream fallback for active
     LaunchedEffect(task.id, playbackAttempt) {
         playbackError = null
         isBuffering = true
 
-        val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
-        ir.ali0003.downloader.downloader.media3.Media3DownloadManagerProvider.registerRequestHeaders(task.url, headers)
-
-        when (playbackAttempt) {
-            0 -> {
-                // Attempt 0: Play local file if available with magic-byte MIME detection
-                val local = targetLocalFile
-                if (local != null && local.exists() && local.length() > 0L && !isPlaceholderFile(local)) {
-                    val mime = detectLocalVideoMimeType(local)
-                    Log.d("InAppVideoPlayer", "Attempt 0: Playing local file ${local.absolutePath} (size: ${local.length()} B, mime: $mime)")
-                    val item = MediaItem.Builder()
-                        .setUri(Uri.fromFile(local))
-                        .setMimeType(mime)
-                        .build()
-                    exoPlayer.setMediaItem(item)
-                    exoPlayer.prepare()
-                    exoPlayer.play()
-                } else if (task.url.isNotBlank()) {
-                    // No local file ready, immediately play from stream / Media3 offline cache
-                    Log.d("InAppVideoPlayer", "Attempt 0: No standalone file found, promoting to Attempt 2 (cache/stream)")
-                    playbackAttempt = 2
-                } else {
-                    playbackError = "فایل محلی یافت نشد و لینک پخش موجود نیست"
-                    isBuffering = false
-                }
+        val local = targetLocalFile
+        if (local != null && local.exists() && local.length() > 0L && !isPlaceholderFile(local)) {
+            val mime = detectLocalVideoMimeType(local)
+            Log.d("InAppVideoPlayer", "Playing local file directly: ${local.absolutePath} (size: ${local.length()} B, mime: $mime)")
+            val item = MediaItem.Builder()
+                .setUri(Uri.fromFile(local))
+                .setMimeType(mime)
+                .build()
+            exoPlayer.setMediaItem(item)
+            exoPlayer.prepare()
+            exoPlayer.play()
+        } else if (task.status != ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED && task.url.isNotBlank()) {
+            val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
+            Log.d("InAppVideoPlayer", "Non-completed preview: streaming from network URL ${task.url} (isHls: $isHls)")
+            val item = if (isHls) {
+                MediaItem.Builder()
+                    .setUri(Uri.parse(task.url))
+                    .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
+                    .build()
+            } else {
+                MediaItem.Builder()
+                    .setUri(Uri.parse(task.url))
+                    .setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP4)
+                    .build()
             }
-            1 -> {
-                // Attempt 1: Local file exists but initial parse failed; force MPEG-TS container
-                val local = targetLocalFile
-                if (local != null && local.exists() && local.length() > 0L) {
-                    Log.d("InAppVideoPlayer", "Attempt 1: Retrying local file forcing MPEG-TS container: ${local.absolutePath}")
-                    val item = MediaItem.Builder()
-                        .setUri(Uri.fromFile(local))
-                        .setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP2T)
-                        .build()
-                    exoPlayer.setMediaItem(item)
-                    exoPlayer.prepare()
-                    exoPlayer.play()
-                } else if (task.url.isNotBlank()) {
-                    playbackAttempt = 2
-                } else {
-                    playbackError = "قالب فایل محلی پشتیبانی نمی‌شود"
-                    isBuffering = false
-                }
-            }
-            2 -> {
-                // Attempt 2: Stream URL / Media3 Offline Cache
-                if (task.url.isNotBlank()) {
-                    val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
-                    Log.d("InAppVideoPlayer", "Attempt 2: Playing stream / Media3 offline cache: ${task.url} (isHls: $isHls)")
-                    val item = if (isHls) {
-                        MediaItem.Builder()
-                            .setUri(Uri.parse(task.url))
-                            .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
-                            .build()
-                    } else {
-                        MediaItem.Builder()
-                            .setUri(Uri.parse(task.url))
-                            .setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP4)
-                            .build()
-                    }
-                    exoPlayer.setMediaItem(item)
-                    exoPlayer.prepare()
-                    exoPlayer.play()
-                } else {
-                    playbackError = "خطا در پخش و عدم وجود لینک استریم"
-                    isBuffering = false
-                }
-            }
+            exoPlayer.setMediaItem(item)
+            exoPlayer.prepare()
+            exoPlayer.play()
+        } else {
+            playbackError = "فایل ویدیو یافت نشد و لینک پخش موجود نیست"
+            isBuffering = false
         }
     }
 
@@ -309,17 +276,9 @@ fun InAppVideoPlayerSheet(
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                Log.e("InAppVideoPlayer", "Playback error on attempt $playbackAttempt: ${error.message}", error)
-                if (playbackAttempt == 0 && targetLocalFile != null && targetLocalFile.exists() && targetLocalFile.length() > 0L) {
-                    Log.w("InAppVideoPlayer", "Local playback attempt 0 failed. Escalating to Attempt 1 (Forced MPEG-TS)...")
-                    playbackAttempt = 1
-                } else if (playbackAttempt < 2 && task.url.isNotBlank()) {
-                    Log.w("InAppVideoPlayer", "Local playback failed. Escalating to Attempt 2 (Stream / Offline Cache)...")
-                    playbackAttempt = 2
-                } else {
-                    isBuffering = false
-                    playbackError = error.localizedMessage ?: "خطا در پخش ویدیو"
-                }
+                Log.e("InAppVideoPlayer", "Playback error: ${error.message}", error)
+                isBuffering = false
+                playbackError = error.localizedMessage ?: "خطا در پخش ویدیو (فایل آسیب دیده یا فرمت پشتیبانی نمی‌شود)"
             }
         }
         exoPlayer.addListener(listener)
@@ -1018,11 +977,13 @@ private fun detectLocalVideoMimeType(file: File): String {
 }
 
 private fun resolveLocalTargetFile(context: Context, task: DownloadTaskEntity, vaultFileManager: VaultFileManager): File? {
-    // 1. Direct explicit task.localFilePath if non-blank and existing
-    task.localFilePath?.takeIf { it.isNotBlank() }?.let { path ->
-        val file = File(path)
-        if (file.exists() && file.length() > 0L && !isPlaceholderFile(file)) {
-            return file
+    // 1. Direct explicit task.localFilePath or task.downloadPath if non-blank and existing
+    listOfNotNull(task.localFilePath, task.downloadPath).forEach { path ->
+        if (path.isNotBlank()) {
+            val file = File(path)
+            if (file.exists() && file.length() > 0L && !isPlaceholderFile(file)) {
+                return file
+            }
         }
     }
 
@@ -1032,25 +993,42 @@ private fun resolveLocalTargetFile(context: Context, task: DownloadTaskEntity, v
         return resolved
     }
 
-    // 3. Search public Downloads and private app directories
-    val publicDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-    val appPublicDir = File(publicDir, "0003_Downloader")
+    // 3. Search public Movies, Downloads and private app directories
+    val publicDownloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+    val publicMoviesDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_MOVIES)
+    val appPublicDir = File(publicDownloadsDir, "0003_Downloader")
+    val appMoviesDir = File(publicMoviesDir, "0003_Downloader")
     val extDir = File(context.getExternalFilesDir(null), "downloads")
     val vaultDir = File(context.filesDir, "vault_media")
 
     val clean = task.fileName.trimStart('.')
     val sanitized = clean.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
     val candidates = mutableListOf(clean, sanitized)
+
     if (clean.endsWith(".m3u8", ignoreCase = true)) {
+        candidates.add(clean.removeSuffix(".m3u8") + ".ts")
+        candidates.add(sanitized.removeSuffix(".m3u8") + ".ts")
         candidates.add(clean.removeSuffix(".m3u8") + ".mp4")
         candidates.add(sanitized.removeSuffix(".m3u8") + ".mp4")
+    }
+    if (clean.endsWith(".mp4", ignoreCase = true)) {
+        candidates.add(clean.removeSuffix(".mp4") + ".ts")
+        candidates.add(sanitized.removeSuffix(".mp4") + ".ts")
+    }
+    if (clean.endsWith(".ts", ignoreCase = true)) {
+        candidates.add(clean.removeSuffix(".ts") + ".mp4")
+        candidates.add(sanitized.removeSuffix(".ts") + ".mp4")
     }
     if (!clean.endsWith(".mp4", ignoreCase = true)) {
         candidates.add("$clean.mp4")
         candidates.add("$sanitized.mp4")
     }
+    if (!clean.endsWith(".ts", ignoreCase = true)) {
+        candidates.add("$clean.ts")
+        candidates.add("$sanitized.ts")
+    }
 
-    val searchDirs = listOf(appPublicDir, publicDir, extDir, vaultDir, context.filesDir)
+    val searchDirs = listOf(appPublicDir, publicDownloadsDir, appMoviesDir, publicMoviesDir, extDir, vaultDir, context.filesDir)
     for (dir in searchDirs) {
         if (!dir.exists()) continue
         for (name in candidates.distinct()) {

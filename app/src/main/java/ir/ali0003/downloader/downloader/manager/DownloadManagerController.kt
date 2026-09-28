@@ -101,9 +101,22 @@ class DownloadManagerController(
                 }
                 if (!destDir.exists()) destDir.mkdirs()
 
-                val sanitizedName = task.fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                val rawSanitized = task.fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+                val isHlsStream = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
+                val sanitizedName = if (isHlsStream) {
+                    if (rawSanitized.endsWith(".mp4", ignoreCase = true)) {
+                        rawSanitized.substringBeforeLast('.') + ".ts"
+                    } else if (!rawSanitized.endsWith(".ts", ignoreCase = true)) {
+                        "$rawSanitized.ts"
+                    } else {
+                        rawSanitized
+                    }
+                } else {
+                    rawSanitized
+                }
                 val outputFile = File(destDir, sanitizedName)
                 downloadDao.updateLocalFilePath(task.id, outputFile.absolutePath)
+                downloadDao.updateDownloadPath(task.id, outputFile.absolutePath)
 
                 Log.d(TAG, "Starting task ${task.id} (${task.fileName}) -> ${outputFile.absolutePath}")
 
@@ -151,17 +164,19 @@ class DownloadManagerController(
 
                         if (!task.isHidden && finalFile.exists()) {
                             try {
+                                val mimeType = if (finalPath.endsWith(".ts", ignoreCase = true)) "video/mp2t" else "video/mp4"
                                 android.media.MediaScannerConnection.scanFile(
                                     context,
                                     arrayOf(finalPath),
-                                    arrayOf("video/mp4")
+                                    arrayOf(mimeType)
                                 ) { path, uri ->
-                                    Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri")
+                                    Log.d(TAG, "MediaScanner indexed completed file: $path -> $uri ($mimeType)")
                                 }
                             } catch (_: Exception) {}
                         }
 
                         // Atomically mark completed in Room with the verified physical file path and exact size
+                        downloadDao.updateDownloadPath(task.id, finalPath)
                         downloadDao.markCompletedWithFile(task.id, finalPath, finalBytes)
 
                         val updatedMap = _taskProgressMap.value.toMutableMap()
