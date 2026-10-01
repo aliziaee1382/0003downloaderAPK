@@ -21,16 +21,17 @@ jobs:
 
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: 8.7
+
+    - name: Prepare Environment Files
+      run: |
+        touch .env.example
+        touch .env
+        touch local.properties
 
     - name: Build Release APK
-      run: |
-        if [ -f "./gradlew" ]; then
-          sed -i 's/\r$//' ./gradlew
-          chmod +x ./gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
-        else
-          gradle assembleRelease --no-daemon --stacktrace
-        fi
+      run: gradle assembleRelease --no-daemon --stacktrace
 
     - name: Upload Release APK
       if: success()
