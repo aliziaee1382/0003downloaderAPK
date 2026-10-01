@@ -17,11 +17,11 @@ data class VideoQualityOption(
 ) {
     val formattedSize: String
         get() {
-            if (estimatedSizeBytes > 0L) {
+            if (estimatedSizeBytes >= 1024 * 1024L) {
                 val sizeStr = formatFileSize(estimatedSizeBytes)
                 return if (isExactSize) sizeStr else "~$sizeStr"
             }
-            return if (isHlsVariant) "Adaptive HLS" else ""
+            return if (isHlsVariant) "استریم HLS" else "محاسبه حین دانلود"
         }
 
     val formattedBandwidth: String

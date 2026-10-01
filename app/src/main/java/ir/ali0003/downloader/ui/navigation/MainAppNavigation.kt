@@ -186,7 +186,7 @@ fun MainAppNavigation(
                             onInspectInBrowser = { url, isHidden ->
                                 browserViewModel.toggleSaveToVault(isHidden)
                                 viewModel.setSelectedTab(0)
-                                browserViewModel.navigateToUrl(url)
+                                browserViewModel.loadUrlInWebView(url)
                             },
                             onTogglePause = { viewModel.togglePause(it) },
                             onToggleVault = { viewModel.toggleVaultHidden(it) },

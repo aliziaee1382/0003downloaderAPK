@@ -51,6 +51,27 @@ class ChunkDownloader(
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .retryOnConnectionFailure(true)
+                .addInterceptor { chain ->
+                    val original = chain.request()
+                    val urlStr = original.url.toString()
+                    val builder = original.newBuilder()
+
+                    // Ensure fresh session cookie is attached across redirects
+                    if (original.header("Cookie").isNullOrBlank()) {
+                        try {
+                            val cookie = android.webkit.CookieManager.getInstance().getCookie(urlStr)
+                            if (!cookie.isNullOrBlank()) {
+                                builder.header("Cookie", cookie)
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    if (original.header("User-Agent").isNullOrBlank()) {
+                        builder.header("User-Agent", DEFAULT_USER_AGENT)
+                    }
+
+                    chain.proceed(builder.build())
+                }
                 .build()
         }
 
@@ -61,13 +82,21 @@ class ChunkDownloader(
         ): Map<String, String> {
             val map = mutableMapOf<String, String>()
 
-            // 1. Parse custom headers from JSON
+            // 1. Parse custom headers from JSON, strictly ignoring Range, Content-Length and Host
             if (!headersJson.isNullOrBlank()) {
                 try {
                     val json = JSONObject(headersJson)
                     json.keys().forEach { key ->
                         val v = json.optString(key)
-                        if (key.isNotBlank() && v.isNotBlank() && !key.startsWith("target_") && !key.startsWith("media3_")) {
+                        val lk = key.lowercase()
+                        if (key.isNotBlank() && v.isNotBlank() &&
+                            !key.startsWith("target_") &&
+                            !key.startsWith("media3_") &&
+                            lk != "range" &&
+                            lk != "if-range" &&
+                            lk != "content-length" &&
+                            lk != "host"
+                        ) {
                             map[key] = v
                         }
                     }
@@ -162,10 +191,11 @@ class ChunkDownloader(
 
         // 1. Range/Head probe to determine content length & Accept-Ranges support
         val probe = probeServer(url, headers, websiteUrl)
-        val contentLength = if (probe.contentLength > 0L) probe.contentLength else task.totalBytes
-        val supportsRange = probe.acceptsRanges && contentLength > 1024 * 1024 // Only range-slice files > 1MB
+        val hasKnownLength = probe.contentLength > 0L
+        val contentLength = if (hasKnownLength) probe.contentLength else task.totalBytes.takeIf { it > 0L } ?: -1L
+        val supportsRange = hasKnownLength && probe.acceptsRanges && contentLength > 1024 * 1024L
 
-        Log.d(TAG, "Task $taskId: length=$contentLength bytes, supportsRange=$supportsRange")
+        Log.d(TAG, "Task $taskId: length=$contentLength bytes, supportsRange=$supportsRange (probeLength=${probe.contentLength})")
 
         // Scratch temp directory for parallel chunks
         val scratchDir = File(context.cacheDir, "chunks_$taskId")
@@ -178,7 +208,10 @@ class ChunkDownloader(
         val settings = DownloadSettingsPreferences.getInstance(context)
         val numThreads = settings.getEffectiveThreadCount().coerceIn(1, 16)
 
-        if (supportsRange && contentLength > 1024 * 1024 && numThreads > 1) {
+        // 1. Smart bypass of multi-threading:
+        // If probe.contentLength <= 0 (e.g. server answered with 400/403/405 or chunked dynamic stream),
+        // strictly bypass multi-threaded coroutineScope block and call downloadSingleStream directly!
+        if (hasKnownLength && supportsRange && contentLength > 1024 * 1024L && numThreads > 1) {
             try {
                 if (!scratchDir.exists()) scratchDir.mkdirs()
                 val chunkSize = contentLength / numThreads
@@ -331,12 +364,30 @@ class ChunkDownloader(
         mergedHeaders.putAll(headers)
 
         mergedHeaders.forEach { (k, v) ->
-            if (k.isNotBlank() && v.isNotBlank() && !k.startsWith("target_") && !k.startsWith("media3_")) {
+            val lk = k.lowercase()
+            if (k.isNotBlank() && v.isNotBlank() &&
+                !k.startsWith("target_") &&
+                !k.startsWith("media3_") &&
+                lk != "range" &&
+                lk != "if-range" &&
+                lk != "content-length" &&
+                lk != "host"
+            ) {
                 try {
                     builder.header(k, v)
                 } catch (_: Exception) {}
             }
         }
+
+        // Strictly purge any Range or Content-Length headers so requests never get clipped to tiny ranges
+        builder.removeHeader("Range")
+        builder.removeHeader("range")
+        builder.removeHeader("If-Range")
+        builder.removeHeader("if-range")
+        builder.removeHeader("Content-Length")
+        builder.removeHeader("content-length")
+        builder.removeHeader("Host")
+        builder.removeHeader("host")
     }
 
     private fun probeServer(
@@ -347,21 +398,25 @@ class ChunkDownloader(
         // Try Range GET probe first with a tiny 1KB chunk:
         // Range GET is far more reliable on CDNs than HEAD (which is often blocked with 403 or 405)
         try {
-            val requestBuilder = Request.Builder()
-                .url(url)
-                .addHeader("Range", "bytes=0-1023")
+            val requestBuilder = Request.Builder().url(url)
             applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
+            requestBuilder.header("Range", "bytes=0-1023")
+            requestBuilder.header("Connection", "close")
             val response = okHttpClient.newCall(requestBuilder.build()).execute()
             response.use { res ->
                 if (res.code == 206) {
                     val contentRange = res.header("Content-Range")
                     val total = contentRange?.substringAfterLast("/")?.trim()?.toLongOrNull() ?: -1L
                     val acceptRanges = res.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) != false
-                    return ServerProbeResult(total, true)
-                } else if (res.isSuccessful) {
+                    if (total > 0L) {
+                        return ServerProbeResult(total, acceptRanges)
+                    }
+                } else if (res.isSuccessful && res.code == 200) {
                     // Server returned 200 OK (ignored Range header -> does NOT support partial content)
                     val contentLength = res.header("Content-Length")?.toLongOrNull() ?: -1L
                     return ServerProbeResult(contentLength, false)
+                } else {
+                    Log.d(TAG, "Range GET probe returned HTTP ${res.code}, will attempt fallback or single stream")
                 }
             }
         } catch (e: Exception) {
@@ -374,16 +429,20 @@ class ChunkDownloader(
             applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
             val response = okHttpClient.newCall(requestBuilder.build()).execute()
             response.use { res ->
-                if (res.isSuccessful) {
+                if (res.isSuccessful && res.code == 200) {
                     val contentLength = res.header("Content-Length")?.toLongOrNull() ?: -1L
                     val acceptRanges = res.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
                     return ServerProbeResult(contentLength, acceptRanges)
+                } else {
+                    Log.d(TAG, "HEAD probe returned HTTP ${res.code}")
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Head probe failed: ${e.message}")
         }
 
+        // If probe requests threw exception or returned server error codes (400, 403, 405, etc.),
+        // return ServerProbeResult(-1L, false) so download automatically falls back to downloadSingleStream without failing
         return ServerProbeResult(-1L, false)
     }
 
@@ -396,11 +455,9 @@ class ChunkDownloader(
         outputFile: File,
         onBytesRead: (Long) -> Unit
     ) {
-        val requestBuilder = Request.Builder()
-            .url(url)
-            .addHeader("Range", "bytes=$startByte-$endByte")
-
+        val requestBuilder = Request.Builder().url(url)
         applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
+        requestBuilder.header("Range", "bytes=$startByte-$endByte")
 
         val response = okHttpClient.newCall(requestBuilder.build()).execute()
         if (!response.isSuccessful || response.code != 206) {
@@ -436,6 +493,10 @@ class ChunkDownloader(
 
         val requestBuilder = Request.Builder().url(url).get()
         applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
+        requestBuilder.removeHeader("Range")
+        requestBuilder.removeHeader("range")
+        // Explicitly set Connection: keep-alive to prevent early socket teardowns by CDNs on streaming responses
+        requestBuilder.header("Connection", "keep-alive")
 
         val call = okHttpClient.newCall(requestBuilder.build())
         val response = call.execute()
@@ -444,6 +505,11 @@ class ChunkDownloader(
         }
 
         val body = response.body ?: throw java.io.IOException("Empty response body from $url")
+        val contentType = (response.header("Content-Type") ?: "").lowercase()
+        if (contentType.contains("text/html") || contentType.contains("application/json")) {
+            throw java.io.IOException("Server returned non-media page ($contentType) instead of video content")
+        }
+
         val remoteLength = body.contentLength()
         val realLength = when {
             remoteLength > 0L -> remoteLength
@@ -467,14 +533,14 @@ class ChunkDownloader(
                     if (now - lastTime >= 350L) {
                         val elapsed = (now - lastTime).coerceAtLeast(1L)
                         val speedBps = ((totalBytesRead - lastBytes) * 1000L) / elapsed
-                        val remaining = (realLength - totalBytesRead).coerceAtLeast(0L)
+                        val remaining = if (realLength > 0L) (realLength - totalBytesRead).coerceAtLeast(0L) else 0L
                         val eta = if (speedBps > 0L && realLength > 0L) remaining / speedBps else 0L
 
                         onProgress(
                             DownloadProgress(
                                 taskId = 0L,
                                 downloadedBytes = totalBytesRead,
-                                totalBytes = realLength,
+                                totalBytes = if (realLength > 0L) realLength else totalBytesRead,
                                 speedBps = speedBps,
                                 etaSeconds = eta
                             )
@@ -488,6 +554,10 @@ class ChunkDownloader(
         }
 
         val finalLength = if (outputFile.exists() && outputFile.length() > 0L) outputFile.length() else totalBytesRead
+        if (finalLength < 1024L) {
+            if (outputFile.exists()) outputFile.delete()
+            throw java.io.IOException("Downloaded MP4 file is incomplete or corrupted ($finalLength bytes)")
+        }
 
         onProgress(
             DownloadProgress(
@@ -518,6 +588,11 @@ class ChunkDownloader(
                 }
             }
             destOut.flush()
+        }
+
+        if (destination.exists() && destination.length() < 1024L) {
+            destination.delete()
+            throw java.io.IOException("Stitched multi-chunk file is too small (${destination.length()} bytes)")
         }
     }
 

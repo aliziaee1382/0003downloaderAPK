@@ -183,6 +183,8 @@ fun InAppBrowserScreen(
     val tabCount by viewModel.tabCount.collectAsStateWithLifecycle()
     val sniffedMediaList by viewModel.sniffedMediaList.collectAsStateWithLifecycle()
     val selectedMedia by viewModel.selectedMedia.collectAsStateWithLifecycle()
+    val hasActivePlayingVideo by viewModel.hasActivePlayingVideo.collectAsStateWithLifecycle()
+    val detectedVideoQualities by viewModel.detectedVideoQualities.collectAsStateWithLifecycle()
     val saveToVault by viewModel.saveToVault.collectAsStateWithLifecycle()
     val toastMessage by viewModel.downloadToastMessage.collectAsStateWithLifecycle()
     val bookmarks by viewModel.bookmarks.collectAsStateWithLifecycle()
@@ -192,8 +194,8 @@ fun InAppBrowserScreen(
     val lastActiveUrl by viewModel.lastActiveUrl.collectAsStateWithLifecycle()
     val lastActiveTitle by viewModel.lastActiveTitle.collectAsStateWithLifecycle()
 
-    var webViewInstance by remember { mutableStateOf<WebView?>(null) }
-    var webViewResetKey by remember { mutableIntStateOf(0) }
+    val webViewResetKey by viewModel.webViewResetTrigger.collectAsStateWithLifecycle()
+    var webViewInstance by remember { mutableStateOf(viewModel.getWebView()) }
     var isEditingUrl by rememberSaveable { mutableStateOf(false) }
     var showSnifferSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
@@ -215,8 +217,9 @@ fun InAppBrowserScreen(
         if (isEditingUrl) {
             isEditingUrl = false
         } else if (!isBrowserHome) {
-            if (webViewInstance?.canGoBack() == true) {
-                webViewInstance?.goBack()
+            val currentWeb = webViewInstance ?: viewModel.getWebView()
+            if (currentWeb?.canGoBack() == true) {
+                currentWeb.goBack()
             } else {
                 viewModel.resetToHome()
             }
@@ -234,6 +237,27 @@ fun InAppBrowserScreen(
         ),
         label = "pulse_scale"
     )
+
+    // Lively pop animation whenever active video changes or first media is detected
+    val fabBounceAnim = remember { androidx.compose.animation.core.Animatable(1f) }
+    LaunchedEffect(selectedMedia?.id, sniffedMediaList.size) {
+        if (sniffedMediaList.isNotEmpty()) {
+            fabBounceAnim.animateTo(
+                targetValue = 1.25f,
+                animationSpec = androidx.compose.animation.core.spring(
+                    dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+                    stiffness = androidx.compose.animation.core.Spring.StiffnessMedium
+                )
+            )
+            fabBounceAnim.animateTo(
+                targetValue = 1f,
+                animationSpec = androidx.compose.animation.core.spring(
+                    dampingRatio = androidx.compose.animation.core.Spring.DampingRatioLowBouncy,
+                    stiffness = androidx.compose.animation.core.Spring.StiffnessLow
+                )
+            )
+        }
+    }
 
     // Handle toast notification auto-dismiss
     LaunchedEffect(toastMessage) {
@@ -262,11 +286,10 @@ fun InAppBrowserScreen(
                     recentHistoryTitle = history.firstOrNull()?.title,
                     onResumePreviousSession = {
                         val restored = viewModel.restorePreviousSession()
-                        webViewInstance?.loadUrl(restored)
+                        viewModel.loadUrlInWebView(restored)
                     },
                     onSearchOrNavigate = { query ->
-                        viewModel.navigateToUrl(query)
-                        webViewInstance?.loadUrl(viewModel.currentUrl.value)
+                        viewModel.loadUrlInWebView(query)
                     },
                     onSaveShortcut = { slotIndex, title, url, id ->
                         viewModel.saveShortcut(slotIndex, title, url, id)
@@ -294,23 +317,20 @@ fun InAppBrowserScreen(
                     onUrlChange = { viewModel.onUrlInputChanged(it) },
                     onNavigate = { url ->
                         isEditingUrl = false
-                        viewModel.navigateToUrl(url)
-                        webViewInstance?.loadUrl(viewModel.currentUrl.value)
+                        viewModel.loadUrlInWebView(url)
                     },
                     onBack = {
-                        if (webViewInstance?.canGoBack() == true) {
-                            webViewInstance?.goBack()
+                        val currentWeb = webViewInstance ?: viewModel.getWebView()
+                        if (currentWeb?.canGoBack() == true) {
+                            currentWeb.goBack()
                         } else {
                             viewModel.resetToHome()
                         }
                     },
-                    onRefresh = { webViewInstance?.reload() },
-                    onStop = { webViewInstance?.stopLoading() },
+                    onRefresh = { (webViewInstance ?: viewModel.getWebView())?.reload() },
+                    onStop = { (webViewInstance ?: viewModel.getWebView())?.stopLoading() },
                     onToggleDesktop = {
                         viewModel.toggleDesktopMode()
-                        webViewInstance?.settings?.userAgentString =
-                            if (!isDesktopMode) DESKTOP_USER_AGENT else null
-                        webViewInstance?.reload()
                     },
                     onNewTab = { viewModel.addNewTab() },
                     onShareLink = {
@@ -347,6 +367,28 @@ fun InAppBrowserScreen(
                     Spacer(modifier = Modifier.height(1.dp))
                 }
 
+                // Active media and badge counter calculation based strictly on current playing video
+                val activeMedia = selectedMedia ?: sniffedMediaList.firstOrNull()
+                val fabBadgeCount = when {
+                    hasActivePlayingVideo && activeMedia != null -> {
+                        val qCount = if (detectedVideoQualities.isNotEmpty()) {
+                            detectedVideoQualities.size
+                        } else {
+                            activeMedia.qualities.size
+                        }
+                        if (qCount > 0) qCount else 1
+                    }
+                    activeMedia != null && sniffedMediaList.size == 1 -> {
+                        val qCount = if (detectedVideoQualities.isNotEmpty()) {
+                            detectedVideoQualities.size
+                        } else {
+                            activeMedia.qualities.size
+                        }
+                        if (qCount > 0) qCount else 1
+                    }
+                    else -> sniffedMediaList.size
+                }
+
                 // WebView Edge-to-Edge Container
                 Box(
                     modifier = Modifier
@@ -357,153 +399,28 @@ fun InAppBrowserScreen(
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
                             factory = { ctx ->
-                                WebView(ctx).apply {
-                                    layoutParams = ViewGroup.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
-                                    )
-
-                                    settings.apply {
-                                        javaScriptEnabled = true
-                                        domStorageEnabled = true
-                                        allowFileAccess = false
-                                        allowContentAccess = true
-                                        loadWithOverviewMode = true
-                                        useWideViewPort = true
-                                        setSupportZoom(true)
-                                        builtInZoomControls = true
-                                        displayZoomControls = false
-                                        mediaPlaybackRequiresUserGesture = false
-                                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                                        cacheMode = WebSettings.LOAD_DEFAULT
+                                val webView = viewModel.getOrCreateWebView(ctx)
+                                webViewInstance = webView
+                                (webView.parent as? ViewGroup)?.removeView(webView)
+                                if (webView.url.isNullOrBlank()) {
+                                    viewModel.restoreWebViewState(webView)
+                                    if (webView.url.isNullOrBlank() && currentUrl.isNotBlank()) {
+                                        webView.loadUrl(currentUrl)
                                     }
-
-                                    CookieManager.getInstance().setAcceptCookie(true)
-                                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-
-                                    addJavascriptInterface(
-                                        viewModel.snifferEngine.VideoSnifferBridge(this),
-                                        VideoSnifferEngine.JS_BRIDGE_NAME
-                                    )
-                                    addJavascriptInterface(
-                                        viewModel.snifferEngine.VideoSnifferBridge(this),
-                                        "AndroidBridge"
-                                    )
-
-                                    setOnTouchListener { _, event ->
-                                        if (event.action == android.view.MotionEvent.ACTION_UP) {
-                                            try {
-                                                evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
-                                            } catch (_: Exception) {}
-                                        }
-                                        false
-                                    }
-
-                                    webViewClient = object : WebViewClient() {
-                                        override fun shouldInterceptRequest(
-                                            view: WebView?,
-                                            request: WebResourceRequest?
-                                        ): WebResourceResponse? {
-                                            return viewModel.snifferEngine.shouldInterceptRequest(view, request)
-                                        }
-
-                                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                                            super.onPageStarted(view, url, favicon)
-                                            if (url != null) {
-                                                viewModel.onPageStarted(url)
-                                            }
-                                        }
-
-                                        override fun onPageFinished(view: WebView?, url: String?) {
-                                            super.onPageFinished(view, url)
-                                            if (url != null) {
-                                                viewModel.onPageFinished(
-                                                    url = url,
-                                                    title = view?.title,
-                                                    canBack = view?.canGoBack() ?: false,
-                                                    canForward = view?.canGoForward() ?: false
-                                                )
-                                                try {
-                                                    view?.evaluateJavascript(VideoSnifferEngine.DOM_SNIFFER_JS, null)
-                                                    view?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
-                                                } catch (_: Exception) {}
-                                            }
-                                        }
-
-                                        override fun onReceivedError(
-                                            view: WebView?,
-                                            request: WebResourceRequest?,
-                                            error: android.webkit.WebResourceError?
-                                        ) {
-                                            super.onReceivedError(view, request, error)
-                                        }
-
-                                        override fun onRenderProcessGone(
-                                            view: WebView?,
-                                            detail: RenderProcessGoneDetail?
-                                        ): Boolean {
-                                            val didCrash = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                                                detail?.didCrash() ?: true
-                                            } else {
-                                                true
-                                            }
-                                            android.util.Log.e("InAppBrowser", "onRenderProcessGone detected (crashed: $didCrash)")
-                                            try {
-                                                view?.let {
-                                                    it.stopLoading()
-                                                    (it.parent as? ViewGroup)?.removeView(it)
-                                                    it.destroy()
-                                                }
-                                            } catch (_: Exception) {}
-                                            webViewInstance = null
-                                            // Safely trigger recreation of WebView
-                                            webViewResetKey++
-                                            return true
-                                        }
-                                    }
-
-                                    webChromeClient = object : WebChromeClient() {
-                                        override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                            super.onProgressChanged(view, newProgress)
-                                            viewModel.onProgressChanged(newProgress)
-                                        }
-
-                                        override fun onReceivedTitle(view: WebView?, title: String?) {
-                                            super.onReceivedTitle(view, title)
-                                            if (!title.isNullOrBlank()) {
-                                                viewModel.onPageFinished(
-                                                    url = view?.url ?: "",
-                                                    title = title,
-                                                    canBack = view?.canGoBack() ?: false,
-                                                    canForward = view?.canGoForward() ?: false
-                                                )
-                                            }
-                                        }
-                                    }
-
-                                    if (currentUrl.isNotBlank()) {
-                                        loadUrl(currentUrl)
-                                    }
-                                    webViewInstance = this
                                 }
+                                webView
                             },
                             update = { view ->
-                                try {
-                                    if (currentUrl.isNotBlank() && view.url != currentUrl) {
-                                        view.loadUrl(currentUrl)
-                                    }
-                                } catch (_: Exception) {}
+                                webViewInstance = view
+                                // CRITICAL: Do NOT call loadUrl on recomposition!
+                                // Recompositions occur on UI state changes or tab switches.
+                                // The persistent WebView maintains its state, scroll position, and history.
                             },
                             onRelease = { view ->
-                                try {
-                                    view.stopLoading()
-                                    view.clearHistory()
-                                    (view.parent as? ViewGroup)?.removeView(view)
-                                    view.destroy()
-                                } catch (_: Exception) {}
-                                if (webViewInstance == view) {
-                                    webViewInstance = null
-                                }
+                                viewModel.saveWebViewState(view)
+                                (view.parent as? ViewGroup)?.removeView(view)
+                                // CRITICAL: Do NOT destroy the WebView here!
+                                // It is kept alive in BrowserViewModel across tab navigation.
                             }
                         )
                     }
@@ -516,12 +433,15 @@ fun InAppBrowserScreen(
                                 .padding(end = 16.dp, bottom = 16.dp)
                         ) {
                             SniffedMediaFab(
-                                count = sniffedMediaList.size,
-                                scale = pulseScale,
+                                count = fabBadgeCount,
+                                scale = pulseScale * fabBounceAnim.value,
                                 isExtracting = isExtractingMedia && sniffedMediaList.isEmpty(),
                                 onClick = {
                                     try {
-                                        webViewInstance?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                                        (webViewInstance ?: viewModel.getWebView())?.evaluateJavascript(
+                                            VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS,
+                                            null
+                                        )
                                     } catch (_: Exception) {}
                                     showSnifferSheet = true
                                 }
@@ -535,15 +455,16 @@ fun InAppBrowserScreen(
                     canGoBack = canGoBack,
                     canGoForward = canGoForward,
                     tabCount = tabCount,
-                    downloadCount = sniffedMediaList.size,
+                    downloadCount = fabBadgeCount,
                     onBack = {
-                        if (webViewInstance?.canGoBack() == true) {
-                            webViewInstance?.goBack()
+                        val currentWeb = webViewInstance ?: viewModel.getWebView()
+                        if (currentWeb?.canGoBack() == true) {
+                            currentWeb.goBack()
                         } else {
                             viewModel.resetToHome()
                         }
                     },
-                    onForward = { webViewInstance?.goForward() },
+                    onForward = { (webViewInstance ?: viewModel.getWebView())?.goForward() },
                     onHome = { viewModel.resetToHome() },
                     onDownloads = onNavigateToDownloads,
                     onTabsClick = { showBookmarksSheet = true }
@@ -555,7 +476,10 @@ fun InAppBrowserScreen(
         if (showSnifferSheet) {
             LaunchedEffect(Unit) {
                 try {
-                    webViewInstance?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                    (webViewInstance ?: viewModel.getWebView())?.evaluateJavascript(
+                        VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS,
+                        null
+                    )
                 } catch (_: Exception) {}
             }
             MediaSnifferBottomSheet(
@@ -569,8 +493,9 @@ fun InAppBrowserScreen(
                     viewModel.selectMedia(null)
                 },
                 onConfirmDownload = { item, quality ->
-                    val webUrl = webViewInstance?.url ?: currentUrl
-                    val webUa = webViewInstance?.settings?.userAgentString
+                    val currentWeb = webViewInstance ?: viewModel.getWebView()
+                    val webUrl = currentWeb?.url ?: currentUrl
+                    val webUa = currentWeb?.settings?.userAgentString
                     val targetUrl = quality?.url ?: item.url
                     val freshCookies = try {
                         android.webkit.CookieManager.getInstance().getCookie(targetUrl)
@@ -616,8 +541,9 @@ fun InAppBrowserScreen(
                 onApplyTheme = onApplyTheme,
                 onDismiss = { showSettingsSheet = false },
                 onClearBrowserData = {
-                    webViewInstance?.clearCache(true)
-                    webViewInstance?.clearHistory()
+                    val currentWeb = webViewInstance ?: viewModel.getWebView()
+                    currentWeb?.clearCache(true)
+                    currentWeb?.clearHistory()
                     CookieManager.getInstance().removeAllCookies(null)
                     viewModel.clearHistory()
                     try {
@@ -639,8 +565,7 @@ fun InAppBrowserScreen(
                 bookmarks = bookmarks,
                 onSelect = { url ->
                     showBookmarksSheet = false
-                    viewModel.navigateToUrl(url)
-                    webViewInstance?.loadUrl(url)
+                    viewModel.loadUrlInWebView(url)
                 },
                 onDelete = { url -> viewModel.removeBookmark(url) },
                 onDismiss = { showBookmarksSheet = false }
@@ -653,8 +578,7 @@ fun InAppBrowserScreen(
                 history = history,
                 onSelect = { url ->
                     showHistorySheet = false
-                    viewModel.navigateToUrl(url)
-                    webViewInstance?.loadUrl(url)
+                    viewModel.loadUrlInWebView(url)
                 },
                 onClearAll = { viewModel.clearHistory() },
                 onDismiss = { showHistorySheet = false }
@@ -718,8 +642,7 @@ fun InAppBrowserScreen(
                     onDownload = {
                         lastHandledClipboardUrl = url
                         detectedClipboardUrl = null
-                        viewModel.navigateToUrl(url)
-                        webViewInstance?.loadUrl(viewModel.currentUrl.value)
+                        viewModel.loadUrlInWebView(url)
                     }
                 )
             }
@@ -728,8 +651,7 @@ fun InAppBrowserScreen(
 
     DisposableEffect(Unit) {
         onDispose {
-            webViewInstance?.destroy()
-            webViewInstance = null
+            viewModel.saveWebViewState()
         }
     }
 }

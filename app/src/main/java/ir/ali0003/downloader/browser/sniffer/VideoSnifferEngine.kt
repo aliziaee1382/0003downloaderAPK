@@ -26,6 +26,20 @@ class VideoSnifferEngine(
     private val context: Context? = null,
     private val onMediaDetected: (SniffedMediaItem) -> Unit
 ) {
+    var onActiveMediaDetected: ((SniffedMediaItem) -> Unit)? = null
+    var onActivePlayStarted: ((url: String, title: String?) -> Unit)? = null
+    private val hasActivePlayingVideo = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val activePlayWindowEnd = java.util.concurrent.atomic.AtomicLong(0L)
+
+    fun activatePlayTimeWindow(durationMs: Long = 500L) {
+        hasActivePlayingVideo.set(true)
+        activePlayWindowEnd.set(android.os.SystemClock.elapsedRealtime() + durationMs)
+    }
+
+    fun isInActivePlayWindow(): Boolean {
+        return android.os.SystemClock.elapsedRealtime() <= activePlayWindowEnd.get()
+    }
+
     private val appContext: Context?
         get() = context?.applicationContext
 
@@ -53,6 +67,8 @@ class VideoSnifferEngine(
         .build()
 
     fun resetSession() {
+        hasActivePlayingVideo.set(false)
+        activePlayWindowEnd.set(0L)
         detectedUrls.clear()
         recentNetworkUrls.clear()
         synchronized(aggregationLock) {
@@ -137,14 +153,93 @@ class VideoSnifferEngine(
             val safePageUrl = if (referer.isNotBlank()) referer else url
             val safePageTitle = currentPageTitle.get()
 
-            processDetectedMediaUrl(
-                mediaUrl = url,
-                pageUrl = safePageUrl,
-                pageTitle = safePageTitle,
-                requestHeaders = requestHeaders
-            )
+            val inPlayWindow = isInActivePlayWindow()
+            val isPlayingActive = hasActivePlayingVideo.get()
+
+            // Time-window Binding (500ms):
+            // Identify the manifest file (.m3u8 or .mpd) or video link requested within this active play window as the primary stream.
+            // Other background/header/feed requests before or without a play event are completely ignored.
+            if (inPlayWindow) {
+                processDetectedMediaUrl(
+                    mediaUrl = url,
+                    pageUrl = safePageUrl,
+                    pageTitle = safePageTitle,
+                    requestHeaders = requestHeaders,
+                    isActivePlayEvent = true
+                )
+            } else if (isPlayingActive) {
+                // If an active stream is already playing, only process additional sub-playlists/renditions of the same stream
+                val isSame = synchronized(aggregationLock) {
+                    val currentMaster = canonicalVideoItem ?: return@synchronized false
+                    val isM3u8 = url.contains(".m3u8", ignoreCase = true)
+                    isSameVideoUrl(currentMaster.url, url) ||
+                            (currentMaster.isM3u8 && isM3u8 && isSameHlsStream(currentMaster.url, url))
+                }
+                if (isSame) {
+                    processDetectedMediaUrl(
+                        mediaUrl = url,
+                        pageUrl = safePageUrl,
+                        pageTitle = safePageTitle,
+                        requestHeaders = requestHeaders,
+                        isActivePlayEvent = false
+                    )
+                }
+            }
         }
 
+        return null
+    }
+
+    /**
+     * Fallback URL interceptor for older WebViews or direct calls
+     */
+    fun shouldInterceptRequestUrl(
+        view: WebView?,
+        url: String?
+    ): WebResourceResponse? {
+        if (url.isNullOrBlank()) return null
+        if (AdBlockEngine.isAdUrl(url) || isAdOrJunkUrl(url)) {
+            return WebResourceResponse("text/plain", "UTF-8", null)
+        }
+
+        if (recentNetworkUrls.size >= 250) {
+            recentNetworkUrls.pollFirst()
+        }
+        recentNetworkUrls.addLast(url)
+
+        if (isMediaUrl(url, emptyMap())) {
+            val safePageUrl = currentPageUrl.get().ifBlank { url }
+            val safePageTitle = currentPageTitle.get()
+
+            val inPlayWindow = isInActivePlayWindow()
+            val isPlayingActive = hasActivePlayingVideo.get()
+
+            if (inPlayWindow) {
+                processDetectedMediaUrl(
+                    mediaUrl = url,
+                    pageUrl = safePageUrl,
+                    pageTitle = safePageTitle,
+                    requestHeaders = emptyMap(),
+                    isActivePlayEvent = true
+                )
+            } else if (isPlayingActive) {
+                val isSame = synchronized(aggregationLock) {
+                    val currentMaster = canonicalVideoItem ?: return@synchronized false
+                    val isM3u8 = url.contains(".m3u8", ignoreCase = true)
+                    isSameVideoUrl(currentMaster.url, url) ||
+                            (currentMaster.isM3u8 && isM3u8 && isSameHlsStream(currentMaster.url, url))
+                }
+                if (isSame) {
+                    processDetectedMediaUrl(
+                        mediaUrl = url,
+                        pageUrl = safePageUrl,
+                        pageTitle = safePageTitle,
+                        requestHeaders = emptyMap(),
+                        isActivePlayEvent = false
+                    )
+                }
+            }
+        }
         return null
     }
 
@@ -239,6 +334,144 @@ class VideoSnifferEngine(
         fun onMediaDefinitionsFound(json: String?) {
             processMediaDefinitions(json)
         }
+
+        @JavascriptInterface
+        fun onActivePlayTriggered(src: String?) {
+            onActivePlayTriggered(src, null)
+        }
+
+        @JavascriptInterface
+        fun onActivePlayTriggered(src: String?, title: String?) {
+            mainHandler.post {
+                activatePlayTimeWindow(500L)
+                val cleanSrc = src?.trim() ?: ""
+                val resolvedSrc = if (cleanSrc.isNotBlank() && !cleanSrc.startsWith("blob:") && !cleanSrc.startsWith("data:") && !cleanSrc.startsWith("javascript:")) {
+                    cleanSrc
+                } else {
+                    ""
+                }
+                onActivePlayStarted?.invoke(resolvedSrc, title)
+            }
+        }
+
+        @JavascriptInterface
+        fun onActiveVideoDetected(src: String?) {
+            onActiveVideoDetected(src, null)
+        }
+
+        @JavascriptInterface
+        fun onActiveVideoDetected(src: String?, title: String?) {
+            if (src.isNullOrBlank()) return
+            val cleanSrc = src.trim()
+            if (cleanSrc.startsWith("blob:") || cleanSrc.startsWith("data:") || cleanSrc.startsWith("javascript:")) return
+            // 1. Strictly ignore partial segments and subtitle fragments
+            if (isChunkFragment(cleanSrc)) return
+
+            mainHandler.post {
+                try {
+                    // Activate 500ms time-window binding immediately
+                    activatePlayTimeWindow(500L)
+
+                    val pageUrl = webView.url ?: currentPageUrl.get()
+                    val currentTitle = if (!title.isNullOrBlank()) title else webView.title ?: currentPageTitle.get()
+                    val userAgent = try { webView.settings.userAgentString } catch (_: Exception) { "" }
+                    val headers = extractHeadersForUrl(cleanSrc, pageUrl, userAgent)
+
+                    val resolvedSrc = if (!cleanSrc.startsWith("http://") && !cleanSrc.startsWith("https://")) {
+                        try {
+                            java.net.URI(pageUrl).resolve(cleanSrc).toString()
+                        } catch (_: Exception) { cleanSrc }
+                    } else {
+                        cleanSrc
+                    }
+
+                    // 1. Mark active video playing and verify if this is a new video
+                    hasActivePlayingVideo.set(true)
+                    val isSame = synchronized(aggregationLock) {
+                        canonicalVideoItem?.let { prev ->
+                            isSameVideoUrl(prev.url, resolvedSrc) ||
+                            (prev.isM3u8 && resolvedSrc.contains(".m3u8", ignoreCase = true) && isSameHlsStream(prev.url, resolvedSrc))
+                        } ?: false
+                    }
+
+                    if (!isSame) {
+                        // Purge previous video's aggregation state so the new video's manifest is parsed independently
+                        synchronized(aggregationLock) {
+                            canonicalVideoItem = null
+                            accumulatedRawQualities.clear()
+                            accumulatedHeaders.clear()
+                        }
+                    }
+
+                    // Immediately signal active play event so ViewModel clears old videos and resets counter
+                    onActivePlayStarted?.invoke(resolvedSrc, currentTitle)
+
+                    // For stream manifests (HLS/DASH), notify UI immediately since it's a full adaptive stream
+                    val isStreamManifest = cleanSrc.contains(".m3u8", ignoreCase = true) || cleanSrc.contains(".mpd", ignoreCase = true)
+                    if (isStreamManifest) {
+                        val immediateItem = createImmediateMediaItem(
+                            mediaUrl = resolvedSrc,
+                            pageUrl = pageUrl,
+                            pageTitle = currentTitle,
+                            headers = headers
+                        )
+                        onActiveMediaDetected?.invoke(immediateItem) ?: onMediaDetected(immediateItem)
+                    }
+
+                    // 2. Perform dedicated background manifest/stream analysis for genuine quality tiers
+                    processDetectedMediaUrl(
+                        mediaUrl = resolvedSrc,
+                        pageUrl = pageUrl,
+                        pageTitle = currentTitle,
+                        requestHeaders = headers,
+                        isActivePlayEvent = true
+                    )
+                } catch (_: Exception) {
+                    // Safe guard against WebView disposal while callback is posting
+                }
+            }
+        }
+    }
+
+    private fun createImmediateMediaItem(
+        mediaUrl: String,
+        pageUrl: String,
+        pageTitle: String,
+        headers: Map<String, String>
+    ): SniffedMediaItem {
+        val isM3u8 = mediaUrl.contains(".m3u8", ignoreCase = true)
+        val isDash = mediaUrl.contains(".mpd", ignoreCase = true)
+        val mime = when {
+            isM3u8 -> "application/x-mpegURL"
+            isDash -> "application/dash+xml"
+            mediaUrl.contains(".webm", ignoreCase = true) -> "video/webm"
+            mediaUrl.contains(".mp3", ignoreCase = true) -> "audio/mpeg"
+            mediaUrl.contains(".m4a", ignoreCase = true) -> "audio/mp4"
+            else -> "video/mp4"
+        }
+        val defaultQuality = VideoQualityOption(
+            label = if (isM3u8) "HLS Adaptive" else "Original Quality",
+            resolution = "",
+            bandwidthBps = 0L,
+            url = mediaUrl,
+            isHlsVariant = isM3u8,
+            estimatedSizeBytes = 0L,
+            formatTag = if (isM3u8) "HLS" else "MP4"
+        )
+        return SniffedMediaItem(
+            id = UUID.randomUUID().toString(),
+            url = mediaUrl,
+            pageUrl = pageUrl,
+            title = pickBestTitle(null, pageTitle, mediaUrl),
+            mimeType = mime,
+            isM3u8 = isM3u8,
+            isDash = isDash,
+            headers = headers,
+            thumbnailUrl = null,
+            durationSeconds = 0.0,
+            fileSizeBytes = 0L,
+            qualities = listOf(defaultQuality)
+        )
     }
 
     /**
@@ -392,6 +625,15 @@ class VideoSnifferEngine(
             val fullHeaders = extractHeadersForUrl(targetUrl, pageUrl, userAgent)
 
             val aggregated = synchronized(aggregationLock) {
+                var previous = canonicalVideoItem
+                val isSame = previous != null && (isSameVideoUrl(previous.url, targetUrl) || (previous.isM3u8 && isTargetHls && isSameHlsStream(previous.url, targetUrl)))
+                if (previous != null && !isSame) {
+                    accumulatedRawQualities.clear()
+                    accumulatedHeaders.clear()
+                    canonicalVideoItem = null
+                    previous = null
+                }
+
                 accumulatedHeaders.putAll(fullHeaders)
                 // Deduplicate incoming options against accumulated to prevent duplicate tiers on repeated taps
                 for (extracted in extractedQualities) {
@@ -404,7 +646,6 @@ class VideoSnifferEngine(
                     accumulatedRawQualities.add(extracted)
                 }
 
-                val previous = canonicalVideoItem
                 val bestTitle = pickBestTitle(previous?.title, pageTitle, targetUrl)
                 val bestPoster = previous?.thumbnailUrl
                 val bestDuration = maxOf(previous?.durationSeconds ?: 0.0, externalDuration)
@@ -436,7 +677,7 @@ class VideoSnifferEngine(
             }
 
             mainHandler.post {
-                onMediaDetected(aggregated)
+                onActiveMediaDetected?.invoke(aggregated) ?: onMediaDetected(aggregated)
             }
 
             // If HLS manifest was found, also probe master playlist details in background
@@ -467,10 +708,33 @@ class VideoSnifferEngine(
 
     private fun isChunkFragment(url: String): Boolean {
         val clean = url.substringBefore('?').substringBefore('#').lowercase()
-        return clean.endsWith(".ts") || clean.endsWith(".m4s") ||
-                url.contains("/segment_", ignoreCase = true) ||
-                url.contains("/seg-", ignoreCase = true) ||
-                url.contains("-frag-", ignoreCase = true)
+        val lower = url.lowercase()
+
+        // 1. Partial streaming chunk extensions
+        if (clean.endsWith(".ts") || clean.endsWith(".m4s") || clean.endsWith(".m4f") ||
+            clean.endsWith(".cmfa") || clean.endsWith(".cmfv") || clean.endsWith(".init") ||
+            clean.endsWith(".key") || clean.endsWith(".vtt") || clean.endsWith(".webvtt") ||
+            clean.endsWith(".srt")
+        ) {
+            return true
+        }
+
+        // 2. Query or fragment parameters indicating chunk segments
+        if (lower.contains(".ts?") || lower.contains(".m4s?") || lower.contains(".vtt?")) {
+            return true
+        }
+
+        // 3. Segment path signatures
+        return lower.contains("/segment_", ignoreCase = true) ||
+                lower.contains("/seg-", ignoreCase = true) ||
+                lower.contains("-frag-", ignoreCase = true) ||
+                lower.contains("/chunk-", ignoreCase = true) ||
+                lower.contains("chunk_", ignoreCase = true) ||
+                lower.contains("/fragments/", ignoreCase = true) ||
+                lower.contains("live_segment", ignoreCase = true) ||
+                lower.contains("media-segment", ignoreCase = true) ||
+                lower.contains("/hls-live/", ignoreCase = true) ||
+                (lower.contains("range=", ignoreCase = true) && lower.contains("bytestart="))
     }
 
     private fun isThumbnailOrPreviewUrl(url: String): Boolean {
@@ -488,36 +752,70 @@ class VideoSnifferEngine(
                 full.contains("type=preview")
     }
 
+    private fun isSameVideoUrl(url1: String, url2: String): Boolean {
+        val norm1 = url1.substringBefore('?').substringBefore('#').trim().lowercase()
+        val norm2 = url2.substringBefore('?').substringBefore('#').trim().lowercase()
+        return norm1 == norm2
+    }
+
+    private fun isSameHlsStream(url1: String, url2: String): Boolean {
+        val norm1 = url1.substringBefore('?').substringBefore('#').trim().lowercase()
+        val norm2 = url2.substringBefore('?').substringBefore('#').trim().lowercase()
+        if (norm1 == norm2) return true
+        val dir1 = norm1.substringBeforeLast('/')
+        val dir2 = norm2.substringBeforeLast('/')
+        return dir1.isNotBlank() && dir1 == dir2
+    }
+
     private fun isMediaUrl(url: String, requestHeaders: Map<String, String>): Boolean {
         if (isAdOrJunkUrl(url)) return false
+        // Strictly filter out partial HLS/DASH segment chunks and subtitles
+        if (isChunkFragment(url)) return false
 
         val cleanUrl = url.substringBefore('?').substringBefore('#').lowercase()
 
         // Direct streams & manifests
         val directMediaExtensions = listOf(
             ".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".flv",
-            ".mp3", ".m4a", ".aac", ".ogg", ".wav"
+            ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".3gp"
         )
         if (directMediaExtensions.any { cleanUrl.endsWith(it) }) return true
 
         // Live stream manifests
         if (cleanUrl.endsWith(".m3u8") || cleanUrl.endsWith(".mpd")) return true
 
-        // URL query heuristics
+        // URL query heuristics & embedded media markers
         val fullLower = url.lowercase()
-        if (fullLower.contains(".m3u8?") ||
+        if (fullLower.contains(".m3u8") ||
+            fullLower.contains(".mpd") ||
+            fullLower.contains(".mp4") ||
+            fullLower.contains(".webm") ||
             fullLower.contains("mime=video") ||
             fullLower.contains("mime=audio") ||
             fullLower.contains("format=m3u8") ||
+            fullLower.contains("format=mp4") ||
             fullLower.contains("type=mp4") ||
-            fullLower.contains("ext=mp4")
+            fullLower.contains("ext=mp4") ||
+            fullLower.contains("ext=m3u8") ||
+            fullLower.contains("videoplayback") ||
+            fullLower.contains("/manifest/hls_variant/") ||
+            fullLower.contains("/manifest/dash/")
         ) {
             return true
         }
 
-        // Accept header heuristics
+        // Accept & Content-Type header heuristics
         val acceptHeader = requestHeaders["Accept"] ?: requestHeaders["accept"] ?: ""
-        if (acceptHeader.contains("video/") || acceptHeader.contains("application/x-mpegurl") || acceptHeader.contains("application/vnd.apple.mpegurl")) {
+        val contentTypeHeader = requestHeaders["Content-Type"] ?: requestHeaders["content-type"] ?: ""
+        val secFetchDest = requestHeaders["Sec-Fetch-Dest"] ?: requestHeaders["sec-fetch-dest"] ?: ""
+        val combinedHeaders = "$acceptHeader $contentTypeHeader $secFetchDest".lowercase()
+        if (combinedHeaders.contains("video/") ||
+            combinedHeaders.contains("video") ||
+            combinedHeaders.contains("audio/") ||
+            combinedHeaders.contains("application/x-mpegurl") ||
+            combinedHeaders.contains("application/vnd.apple.mpegurl") ||
+            combinedHeaders.contains("application/dash+xml")
+        ) {
             return true
         }
 
@@ -533,18 +831,19 @@ class VideoSnifferEngine(
         durationSeconds: Double = 0.0,
         specifiedMime: String? = null,
         qualityLabelHint: String? = null,
-        resolutionHint: String? = null
+        resolutionHint: String? = null,
+        isActivePlayEvent: Boolean = false
     ) {
         if (isAdOrJunkUrl(mediaUrl)) return
 
-        // Skip loose chunks if an HLS master manifest has already been registered
-        val hasHlsMaster = synchronized(aggregationLock) { canonicalVideoItem?.isM3u8 == true }
-        if (hasHlsMaster && isChunkFragment(mediaUrl)) {
+        // 1. Unconditionally reject partial segments and subtitle fragments
+        if (isChunkFragment(mediaUrl)) {
             return
         }
 
-        if (!detectedUrls.add(mediaUrl)) {
-            // Already processed this URL in current session
+        val isNew = detectedUrls.add(mediaUrl)
+        if (!isNew && !isActivePlayEvent) {
+            // Already processed this URL in current session and not an active play event
             return
         }
 
@@ -553,6 +852,18 @@ class VideoSnifferEngine(
                     specifiedMime?.contains("mpegurl", ignoreCase = true) == true
             val isDash = mediaUrl.contains(".mpd", ignoreCase = true) ||
                     specifiedMime?.contains("dash+xml", ignoreCase = true) == true
+
+            // When an active video is playing, strictly reject background videos, scroll previews, or ads from accumulating
+            if (!isActivePlayEvent && hasActivePlayingVideo.get()) {
+                val currentMaster = synchronized(aggregationLock) { canonicalVideoItem }
+                if (currentMaster != null) {
+                    val isSame = isSameVideoUrl(currentMaster.url, mediaUrl) ||
+                            (currentMaster.isM3u8 && isM3u8 && isSameHlsStream(currentMaster.url, mediaUrl))
+                    if (!isSame) {
+                        return@launch
+                    }
+                }
+            }
 
             val fullHeaders = extractHeadersForUrl(mediaUrl, pageUrl, null, requestHeaders)
 
@@ -613,7 +924,9 @@ class VideoSnifferEngine(
                     }
                 }
 
-                detectedSize = qualities.firstOrNull()?.estimatedSizeBytes ?: 0L
+                // Never treat manifest text file size (a few KB) as video file size
+                val genuineHlsSize = qualities.firstOrNull { it.estimatedSizeBytes >= 1024 * 1024L }?.estimatedSizeBytes ?: 0L
+                detectedSize = if (genuineHlsSize >= 1024 * 1024L) genuineHlsSize else 0L
             } else {
                 // Direct video link (MP4 / WebM) - 2-phase probe (HEAD fallback to Range: bytes=0-1)
                 val probe = probeMediaHeadersAndSize(mediaUrl, fullHeaders)
@@ -624,14 +937,25 @@ class VideoSnifferEngine(
                         mediaUrl.contains(".mp3", ignoreCase = true) ||
                         mediaUrl.contains(".m4a", ignoreCase = true)
 
-                // Filter Out Micro-Clips & Thumbnail Previews:
+                // Reject text/html server error responses or non-media payloads
+                if (probe.mimeType != null && probe.mimeType!!.startsWith("text/", ignoreCase = true)) {
+                    return@launch
+                }
+
+                // 3. Minimum size validation for direct video files:
+                // Direct files under 1 MB are tracking pixels, previews, stickers, ads, or server errors.
+                if (!isAudio && detectedSize in 1 until (1024 * 1024L)) {
+                    return@launch
+                }
+
+                // Filter Out Micro-Clips & Thumbnail Previews (unless triggered by an active play event):
                 // Discard background preview MP4s matching common patterns under 1 MB
                 val isPreview = isThumbnailOrPreviewUrl(mediaUrl)
                 if (!isAudio && isPreview && (detectedSize in 0 until (1024 * 1024L) || (finalDuration in 0.001..9.999))) {
                     return@launch
                 }
 
-                // If a full media item already exists on page (>= 1.5 MB or duration >= 10s), discard incoming micro-clips
+                // If a full media item already exists on page (>= 1.5 MB or duration >= 10s), discard incoming background micro-clips
                 val hasExistingFullVideo = synchronized(aggregationLock) {
                     val prev = canonicalVideoItem
                     prev != null && !prev.mimeType.contains("audio", ignoreCase = true) &&
@@ -663,10 +987,24 @@ class VideoSnifferEngine(
 
             // UNIFIED AGGREGATION & CANONICAL MERGE
             val aggregatedCanonical: SniffedMediaItem = synchronized(aggregationLock) {
-                val previous = canonicalVideoItem
+                var previous = canonicalVideoItem
                 val isAudioItem = detectedMime.contains("audio", ignoreCase = true) ||
                         mediaUrl.contains(".mp3", ignoreCase = true) ||
                         mediaUrl.contains(".m4a", ignoreCase = true)
+
+                val isSameVideo = previous != null && (
+                    isSameVideoUrl(previous.url, mediaUrl) ||
+                    (previous.isM3u8 && isM3u8 && isSameHlsStream(previous.url, mediaUrl))
+                )
+
+                if (isActivePlayEvent && !isSameVideo) {
+                    // Replace on Active Play:
+                    // Purge previous video's qualities, headers, and reference entirely so only this video's real qualities exist
+                    accumulatedRawQualities.clear()
+                    accumulatedHeaders.clear()
+                    canonicalVideoItem = null
+                    previous = null
+                }
 
                 val isIncomingSubstantial = detectedSize >= 1536 * 1024L || finalDuration >= 10.0 || isAudioItem
                 val wasPreviousMicroClip = previous != null &&
@@ -692,7 +1030,7 @@ class VideoSnifferEngine(
                     hasIncomingProgressiveMp4 && previousHasOnlyVagueHls -> true
                     hasIncomingProgressiveMp4 && previous.fileSizeBytes < detectedSize -> true
                     isM3u8 && qualities.any { it.resolution.isNotBlank() } && !previous.isM3u8 -> true
-                    detectedSize > previous.fileSizeBytes -> true
+                    detectedSize > (previous.fileSizeBytes) -> true
                     else -> false
                 }
 
@@ -717,27 +1055,52 @@ class VideoSnifferEngine(
                     fallbackUrl = primaryUrl
                 )
 
-                val updatedItem = SniffedMediaItem(
-                    id = previous?.id ?: UUID.randomUUID().toString(),
-                    url = primaryUrl,
+                val distinctItem = SniffedMediaItem(
+                    id = UUID.randomUUID().toString(),
+                    url = mediaUrl,
                     pageUrl = if (pageUrl.isNotBlank()) pageUrl else currentPageUrl.get(),
-                    title = bestTitle,
-                    mimeType = primaryMime,
-                    isM3u8 = isMasterM3u8,
-                    isDash = isMasterDash,
-                    headers = accumulatedHeaders.toMap(),
-                    thumbnailUrl = bestPoster,
-                    durationSeconds = bestDuration,
-                    fileSizeBytes = bestBaseSize,
-                    qualities = standardizedQualities
+                    title = pickBestTitle(null, pageTitle, mediaUrl),
+                    mimeType = detectedMime,
+                    isM3u8 = isM3u8,
+                    isDash = isDash,
+                    headers = fullHeaders,
+                    thumbnailUrl = posterUrl,
+                    durationSeconds = finalDuration,
+                    fileSizeBytes = detectedSize,
+                    qualities = qualities
                 )
 
-                canonicalVideoItem = updatedItem
+                val updatedItem = if (isSameVideo || previous == null) {
+                    SniffedMediaItem(
+                        id = previous?.id ?: UUID.randomUUID().toString(),
+                        url = primaryUrl,
+                        pageUrl = if (pageUrl.isNotBlank()) pageUrl else currentPageUrl.get(),
+                        title = bestTitle,
+                        mimeType = primaryMime,
+                        isM3u8 = isMasterM3u8,
+                        isDash = isMasterDash,
+                        headers = accumulatedHeaders.toMap(),
+                        thumbnailUrl = bestPoster,
+                        durationSeconds = bestDuration,
+                        fileSizeBytes = bestBaseSize,
+                        qualities = standardizedQualities
+                    )
+                } else {
+                    distinctItem
+                }
+
+                if (isSameVideo || previous == null || isActivePlayEvent) {
+                    canonicalVideoItem = updatedItem
+                }
                 updatedItem
             }
 
             mainHandler.post {
-                onMediaDetected(aggregatedCanonical)
+                if (isActivePlayEvent) {
+                    onActiveMediaDetected?.invoke(aggregatedCanonical) ?: onMediaDetected(aggregatedCanonical)
+                } else {
+                    onMediaDetected(aggregatedCanonical)
+                }
             }
         }
     }
@@ -1031,7 +1394,7 @@ class VideoSnifferEngine(
                     bandwidthBps = 0L,
                     url = fallbackUrl,
                     isHlsVariant = isHls,
-                    estimatedSizeBytes = baseFileSizeBytes,
+                    estimatedSizeBytes = if (isHls && baseFileSizeBytes < 1024 * 1024L) 0L else baseFileSizeBytes,
                     formatTag = if (isHls) "HLS" else "MP4"
                 )
             )
@@ -1076,8 +1439,10 @@ class VideoSnifferEngine(
             urlDeduplicated.filterNot { opt ->
                 val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
                 if (isAudio) return@filterNot false
+                if (opt.isHlsVariant) return@filterNot false
                 val isPreview = isThumbnailOrPreviewUrl(opt.url) || isThumbnailOrPreviewUrl(opt.label)
-                isPreview && (opt.estimatedSizeBytes in 0 until (1024 * 1024L))
+                val isUnder1MB = opt.estimatedSizeBytes in 1 until (1024 * 1024L)
+                isPreview || isUnder1MB
             }
         }
 
@@ -1190,7 +1555,12 @@ class VideoSnifferEngine(
             if (opt.estimatedSizeBytes > 0L) {
                 seenExactSizes.add(opt.estimatedSizeBytes)
             }
-            uniqueVideoOptions.add(opt)
+            val sanitizedOpt = if (opt.isHlsVariant && opt.estimatedSizeBytes in 1 until (1024 * 1024L)) {
+                opt.copy(estimatedSizeBytes = 0L)
+            } else {
+                opt
+            }
+            uniqueVideoOptions.add(sanitizedOpt)
         }
 
         // 7. Audio track at the bottom
@@ -1278,9 +1648,12 @@ class VideoSnifferEngine(
             headers["User-Agent"] = effectiveUa
         }
 
-        // 4. Merge other existing headers
+        // 4. Merge other existing headers (purging range and transport-specific headers)
         existingHeaders.forEach { (k, v) ->
-            if (!headers.containsKey(k) && k.isNotBlank() && v.isNotBlank()) {
+            val lk = k.lowercase()
+            if (!headers.containsKey(k) && k.isNotBlank() && v.isNotBlank() &&
+                lk != "range" && lk != "if-range" && lk != "content-length" && lk != "host"
+            ) {
                 headers[k] = v
             }
         }
@@ -1304,6 +1677,201 @@ class VideoSnifferEngine(
 
     companion object {
         const val JS_BRIDGE_NAME = "AndroidVideoSniffer"
+
+        const val BLOB_HOOK_SNIFFER_JS = """
+            (function() {
+                if (window.__blobHookInjected) return;
+                window.__blobHookInjected = true;
+
+                window.__recentMediaUrls = window.__recentMediaUrls || [];
+                window.__blobToSourceMap = window.__blobToSourceMap || {};
+
+                function normalizeUrl(u) {
+                    if (!u || typeof u !== 'string') return '';
+                    try {
+                        var a = document.createElement('a');
+                        a.href = u;
+                        return a.href;
+                    } catch(e) {
+                        return u;
+                    }
+                }
+
+                function recordMediaUrl(url) {
+                    if (!url || typeof url !== 'string') return;
+                    var lower = url.toLowerCase();
+                    if (lower.indexOf('.m3u8') !== -1 || lower.indexOf('.mpd') !== -1 ||
+                        lower.indexOf('.mp4') !== -1 || lower.indexOf('.webm') !== -1 ||
+                        lower.indexOf('manifest') !== -1 || lower.indexOf('playlist') !== -1 ||
+                        lower.indexOf('master') !== -1) {
+                        var full = normalizeUrl(url);
+                        window.__recentMediaUrls.unshift({ url: full, time: Date.now() });
+                        if (window.__recentMediaUrls.length > 50) {
+                            window.__recentMediaUrls.pop();
+                        }
+                    }
+                }
+
+                // 1. Hook window.fetch to capture stream manifests & direct media URLs
+                try {
+                    if (window.fetch) {
+                        var origFetch = window.fetch;
+                        window.fetch = function(input, init) {
+                            try {
+                                var u = (typeof input === 'string') ? input : (input && input.url);
+                                if (u) recordMediaUrl(u);
+                            } catch(e) {}
+                            return origFetch.apply(this, arguments);
+                        };
+                    }
+                } catch(e) {}
+
+                // 2. Hook XMLHttpRequest.prototype.open
+                try {
+                    if (window.XMLHttpRequest && XMLHttpRequest.prototype && XMLHttpRequest.prototype.open) {
+                        var origOpen = XMLHttpRequest.prototype.open;
+                        XMLHttpRequest.prototype.open = function(method, url) {
+                            try {
+                                if (url) recordMediaUrl(url);
+                            } catch(e) {}
+                            return origOpen.apply(this, arguments);
+                        };
+                    }
+                } catch(e) {}
+
+                // 3. Hook URL.createObjectURL to map blob URLs to original stream manifests
+                try {
+                    if (window.URL && typeof window.URL.createObjectURL === 'function') {
+                        var origCreateObjectURL = window.URL.createObjectURL;
+                        window.URL.createObjectURL = function(obj) {
+                            var blobUrl = origCreateObjectURL.call(window.URL, obj);
+                            try {
+                                var now = Date.now();
+                                var match = (window.__recentMediaUrls && window.__recentMediaUrls.length > 0)
+                                    ? window.__recentMediaUrls.find(function(item) { return (now - item.time) < 15000; })
+                                    : null;
+
+                                var sourceUrl = match ? match.url : (obj && (obj.__sourceUrl || obj.src || obj.url));
+                                if (sourceUrl) {
+                                    window.__blobToSourceMap[blobUrl] = sourceUrl;
+                                }
+                            } catch(e) {}
+                            return blobUrl;
+                        };
+                    }
+                } catch(e) {}
+
+                // 4. Hook MediaSource
+                try {
+                    if (window.MediaSource) {
+                        var origAddSourceBuffer = MediaSource.prototype.addSourceBuffer;
+                        MediaSource.prototype.addSourceBuffer = function() {
+                            try {
+                                if (window.__recentMediaUrls && window.__recentMediaUrls.length > 0) {
+                                    this.__sourceUrl = window.__recentMediaUrls[0].url;
+                                }
+                            } catch(e) {}
+                            return origAddSourceBuffer.apply(this, arguments);
+                        };
+                    }
+                } catch(e) {}
+
+                // 5. Hook HTMLVideoElement.prototype.src setter
+                try {
+                    var videoProto = window.HTMLVideoElement ? window.HTMLVideoElement.prototype : (window.HTMLMediaElement ? window.HTMLMediaElement.prototype : null);
+                    if (videoProto) {
+                        var desc = Object.getOwnPropertyDescriptor(videoProto, 'src') ||
+                                   (window.HTMLMediaElement ? Object.getOwnPropertyDescriptor(window.HTMLMediaElement.prototype, 'src') : null);
+                        if (desc && desc.set) {
+                            var origSet = desc.set;
+                            desc.set = function(val) {
+                                try {
+                                    if (val && typeof val === 'string' && val.indexOf('blob:') === 0) {
+                                        var mapped = window.__blobToSourceMap[val];
+                                        if (mapped) {
+                                            this.__originalSourceUrl = mapped;
+                                        }
+                                    } else if (val && typeof val === 'string') {
+                                        recordMediaUrl(val);
+                                    }
+                                } catch(e) {}
+                                return origSet.call(this, val);
+                            };
+                            Object.defineProperty(videoProto, 'src', desc);
+                        }
+                    }
+                } catch(e) {}
+            })();
+        """
+
+        const val PLAY_EVENT_SNIFFER_JS = """
+            (function() {
+                if (window.__videoPlaySnifferInjected) return;
+                window.__videoPlaySnifferInjected = true;
+
+                function getBridge() {
+                    return window.AndroidBridge || window.AndroidVideoSniffer || null;
+                }
+
+                document.addEventListener('play', function(e) {
+                    if (e.target && e.target.tagName === 'VIDEO') {
+                        var video = e.target;
+                        var bridge = getBridge();
+                        if (!bridge) return;
+
+                        var title = document.title || '';
+                        try {
+                            var elemTitle = video.getAttribute('title') || video.getAttribute('aria-label');
+                            if (elemTitle) title = elemTitle;
+                        } catch(_) {}
+
+                        var currentSrcVal = video.currentSrc || video.src || '';
+
+                        // 1. Immediately trigger active play window (500ms binding on Android)
+                        try {
+                            if (typeof bridge.onActivePlayTriggered === 'function') {
+                                bridge.onActivePlayTriggered(currentSrcVal, title);
+                            }
+                        } catch(_) {}
+
+                        var src = currentSrcVal;
+                        if (!src || src.indexOf('blob:') === 0) {
+                            var s = video.querySelector('source');
+                            if (s) {
+                                var sSrc = s.src || s.getAttribute('src');
+                                if (sSrc && sSrc.indexOf('blob:') !== 0) {
+                                    src = sSrc;
+                                }
+                            }
+                        }
+
+                        // 2. Resolve blob: using URL.createObjectURL hook map or recent stream manifests
+                        if (src && src.indexOf('blob:') === 0) {
+                            var mapped = (window.__blobToSourceMap && window.__blobToSourceMap[src]) || video.__originalSourceUrl;
+                            if (!mapped && window.__recentMediaUrls && window.__recentMediaUrls.length > 0) {
+                                var now = Date.now();
+                                var match = window.__recentMediaUrls.find(function(item) {
+                                    return (now - item.time) < 15000;
+                                });
+                                if (match) mapped = match.url;
+                            }
+                            if (mapped) {
+                                src = mapped;
+                            }
+                        }
+
+                        // 3. Dispatch genuine stream source to Android client
+                        if (src && src.indexOf('blob:') !== 0) {
+                            try {
+                                if (typeof bridge.onActiveVideoDetected === 'function') {
+                                    bridge.onActiveVideoDetected(src, title);
+                                }
+                            } catch(_) {}
+                        }
+                    }
+                }, true);
+            })();
+        """
 
         const val MEDIA_DEFINITIONS_EXTRACTOR_JS = """javascript:(function(){
             try {

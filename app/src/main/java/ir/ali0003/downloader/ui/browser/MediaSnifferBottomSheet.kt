@@ -356,18 +356,23 @@ private fun DirectQualitySheetContent(
                             fontWeight = FontWeight.SemiBold
                         )
                         val headerSize = when {
-                            (selectedOption?.estimatedSizeBytes ?: 0L) > 0L -> {
+                            (selectedOption?.estimatedSizeBytes ?: 0L) >= 1024 * 1024L -> {
                                 val s = VideoQualityOption.formatFileSize(selectedOption!!.estimatedSizeBytes)
                                 if (selectedOption!!.isExactSize) s else "~$s"
                             }
-                            mediaItem.bestFileSizeBytes > 0L -> {
+                            mediaItem.bestFileSizeBytes >= 1024 * 1024L -> {
                                 VideoQualityOption.formatFileSize(mediaItem.bestFileSizeBytes)
                             }
                             mediaItem.durationSeconds > 0.0 -> {
                                 val est = ((2_000_000L * mediaItem.durationSeconds) / 8.0).toLong()
-                                "~${VideoQualityOption.formatFileSize(est)}"
+                                if (est >= 1024 * 1024L) "~${VideoQualityOption.formatFileSize(est)}"
+                                else if (mediaItem.isM3u8) "استریم HLS"
+                                else if (mediaItem.isDash) "استریم DASH"
+                                else "محاسبه حین دانلود"
                             }
-                            else -> ""
+                            mediaItem.isM3u8 -> "استریم HLS"
+                            mediaItem.isDash -> "استریم DASH"
+                            else -> "محاسبه حین دانلود"
                         }
                         if (headerSize.isNotBlank()) {
                             Text(
@@ -540,10 +545,10 @@ fun calculateOptionDisplaySize(
     baseFileSizeBytes: Long = 0L
 ): String {
     // 1. Direct exact or estimated size already on this option
-    if (option.isExactSize && option.estimatedSizeBytes > 0L) {
+    if (option.isExactSize && option.estimatedSizeBytes >= 1024 * 1024L) {
         return VideoQualityOption.formatFileSize(option.estimatedSizeBytes)
     }
-    if (option.estimatedSizeBytes > 0L) {
+    if (option.estimatedSizeBytes >= 1024 * 1024L) {
         return "~" + VideoQualityOption.formatFileSize(option.estimatedSizeBytes)
     }
 
@@ -553,7 +558,7 @@ fun calculateOptionDisplaySize(
     // 2. If duration is known and bandwidth is known
     if (mediaDurationSeconds > 0.0 && option.bandwidthBps > 0L) {
         val est = ((option.bandwidthBps * mediaDurationSeconds) / 8.0).toLong()
-        if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+        if (est >= 1024 * 1024L) return "~" + VideoQualityOption.formatFileSize(est)
     }
 
     // 3. If duration is known and bitrate can be estimated from height
@@ -571,23 +576,23 @@ fun calculateOptionDisplaySize(
             else -> 1_500_000L
         }
         val est = ((estBitrate * mediaDurationSeconds) / 8.0).toLong()
-        if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+        if (est >= 1024 * 1024L) return "~" + VideoQualityOption.formatFileSize(est)
     }
 
     // 4. Extrapolate from another option in the same list that HAS a known estimatedSizeBytes
-    val refOpt = allOptions.firstOrNull { it.estimatedSizeBytes > 0L && it.getResolutionHeight() > 0 }
+    val refOpt = allOptions.firstOrNull { it.estimatedSizeBytes >= 1024 * 1024L && it.getResolutionHeight() > 0 }
     val currentHeight = option.getResolutionHeight()
     if (refOpt != null && currentHeight > 0) {
         val refHeight = refOpt.getResolutionHeight()
         val scale = Math.pow(currentHeight.toDouble() / refHeight.toDouble(), 1.25)
         val extrapolated = (refOpt.estimatedSizeBytes * scale).toLong()
-        if (extrapolated > 0L) {
+        if (extrapolated >= 1024 * 1024L) {
             return "~" + VideoQualityOption.formatFileSize(extrapolated)
         }
     }
 
-    // 5. Extrapolate from baseFileSizeBytes
-    if (baseFileSizeBytes > 0L) {
+    // 5. Extrapolate from baseFileSizeBytes (only if base size is a genuine video file >= 1MB)
+    if (baseFileSizeBytes >= 1024 * 1024L) {
         if (currentHeight > 0) {
             val scale = when {
                 currentHeight >= 1080 -> 1.0
@@ -597,7 +602,7 @@ fun calculateOptionDisplaySize(
                 else -> 0.12
             }
             val est = (baseFileSizeBytes * scale).toLong()
-            if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+            if (est >= 1024 * 1024L) return "~" + VideoQualityOption.formatFileSize(est)
         } else {
             return "~" + VideoQualityOption.formatFileSize(baseFileSizeBytes)
         }
@@ -606,22 +611,26 @@ fun calculateOptionDisplaySize(
     // 6. Bandwidth with default estimated duration (e.g. 180 seconds / 3 mins)
     if (option.bandwidthBps > 0L) {
         val est = ((option.bandwidthBps * 180.0) / 8.0).toLong()
-        if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+        if (est >= 1024 * 1024L) return "~" + VideoQualityOption.formatFileSize(est)
     }
 
     // 7. Standard plausible estimation based on resolution height
-    val defaultEstimate = when {
-        currentHeight >= 2160 -> 120 * 1024 * 1024L
-        currentHeight >= 1440 -> 70 * 1024 * 1024L
-        currentHeight >= 1080 -> 45 * 1024 * 1024L
-        currentHeight >= 720 -> 24 * 1024 * 1024L
-        currentHeight >= 480 -> 14 * 1024 * 1024L
-        currentHeight >= 360 -> 8 * 1024 * 1024L
-        currentHeight >= 240 -> 5 * 1024 * 1024L
-        isAudio -> 3 * 1024 * 1024L
-        else -> 20 * 1024 * 1024L
+    if (currentHeight > 0) {
+        val defaultEstimate = when {
+            currentHeight >= 2160 -> 120 * 1024 * 1024L
+            currentHeight >= 1440 -> 70 * 1024 * 1024L
+            currentHeight >= 1080 -> 45 * 1024 * 1024L
+            currentHeight >= 720 -> 24 * 1024 * 1024L
+            currentHeight >= 480 -> 14 * 1024 * 1024L
+            currentHeight >= 360 -> 8 * 1024 * 1024L
+            currentHeight >= 240 -> 5 * 1024 * 1024L
+            isAudio -> 3 * 1024 * 1024L
+            else -> 20 * 1024 * 1024L
+        }
+        return "~" + VideoQualityOption.formatFileSize(defaultEstimate)
     }
-    return "~" + VideoQualityOption.formatFileSize(defaultEstimate)
+
+    return if (option.isHlsVariant) "استریم HLS" else "محاسبه حین دانلود"
 }
 
 /**

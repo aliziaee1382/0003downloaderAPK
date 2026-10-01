@@ -1,7 +1,21 @@
 package ir.ali0003.downloader.browser.viewmodel
 
+import android.annotation.SuppressLint
 import android.app.Application
+import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Bundle
+import android.util.Log
+import android.view.ViewGroup
+import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import ir.ali0003.downloader.browser.model.SniffedMediaItem
@@ -44,6 +58,224 @@ data class BrowserHistoryEntry(
 )
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        const val DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    // Persistent WebView instance and saved state Bundle across tab changes and recompositions
+    @SuppressLint("StaticFieldLeak")
+    private var persistentWebView: WebView? = null
+    val webViewStateBundle = Bundle()
+
+    private val _webViewResetTrigger = MutableStateFlow(0)
+    val webViewResetTrigger: StateFlow<Int> = _webViewResetTrigger.asStateFlow()
+
+    fun getWebView(): WebView? = persistentWebView
+
+    @SuppressLint("SetJavaScriptEnabled")
+    fun getOrCreateWebView(context: Context): WebView {
+        persistentWebView?.let { existing ->
+            (existing.parent as? ViewGroup)?.removeView(existing)
+            return existing
+        }
+
+        val newWebView = WebView(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                allowFileAccess = false
+                allowContentAccess = true
+                loadWithOverviewMode = true
+                useWideViewPort = true
+                setSupportZoom(true)
+                builtInZoomControls = true
+                displayZoomControls = false
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                cacheMode = WebSettings.LOAD_DEFAULT
+                if (_isDesktopMode.value) {
+                    userAgentString = DESKTOP_USER_AGENT
+                }
+            }
+
+            CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+            addJavascriptInterface(
+                snifferEngine.VideoSnifferBridge(this),
+                VideoSnifferEngine.JS_BRIDGE_NAME
+            )
+            addJavascriptInterface(
+                snifferEngine.VideoSnifferBridge(this),
+                "AndroidBridge"
+            )
+
+            setOnTouchListener { _, event ->
+                if (event.action == android.view.MotionEvent.ACTION_UP) {
+                    try {
+                        evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                    } catch (_: Exception) {}
+                }
+                false
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    return snifferEngine.shouldInterceptRequest(view, request)
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    url: String?
+                ): WebResourceResponse? {
+                    return snifferEngine.shouldInterceptRequestUrl(view, url)
+                }
+
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    if (url != null) {
+                        this@BrowserViewModel.onPageStarted(url)
+                    }
+                    try {
+                        view?.evaluateJavascript(VideoSnifferEngine.BLOB_HOOK_SNIFFER_JS, null)
+                        view?.evaluateJavascript(VideoSnifferEngine.PLAY_EVENT_SNIFFER_JS, null)
+                    } catch (_: Exception) {}
+                }
+
+                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    super.doUpdateVisitedHistory(view, url, isReload)
+                    if (url != null && !isReload && url != _currentUrl.value && !url.startsWith("data:") && !url.startsWith("about:")) {
+                        this@BrowserViewModel.onPageStarted(url)
+                    }
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    if (url != null) {
+                        this@BrowserViewModel.onPageFinished(
+                            url = url,
+                            title = view?.title,
+                            canBack = view?.canGoBack() ?: false,
+                            canForward = view?.canGoForward() ?: false
+                        )
+                        try {
+                            view?.evaluateJavascript(VideoSnifferEngine.BLOB_HOOK_SNIFFER_JS, null)
+                            view?.evaluateJavascript(VideoSnifferEngine.DOM_SNIFFER_JS, null)
+                            view?.evaluateJavascript(VideoSnifferEngine.PORNHUB_FLASHVARS_EXTRACTOR_JS, null)
+                            view?.evaluateJavascript(VideoSnifferEngine.PLAY_EVENT_SNIFFER_JS, null)
+                        } catch (_: Exception) {}
+                    }
+                }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: android.webkit.WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                }
+
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?
+                ): Boolean {
+                    val didCrash = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        detail?.didCrash() ?: true
+                    } else {
+                        true
+                    }
+                    Log.e("InAppBrowser", "onRenderProcessGone detected (crashed: $didCrash)")
+                    try {
+                        view?.let {
+                            it.stopLoading()
+                            (it.parent as? ViewGroup)?.removeView(it)
+                            it.destroy()
+                        }
+                    } catch (_: Exception) {}
+                    if (persistentWebView == view) {
+                        persistentWebView = null
+                    }
+                    webViewStateBundle.clear()
+                    _webViewResetTrigger.value += 1
+                    return true
+                }
+            }
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    super.onProgressChanged(view, newProgress)
+                    this@BrowserViewModel.onProgressChanged(newProgress)
+                }
+
+                override fun onReceivedTitle(view: WebView?, title: String?) {
+                    super.onReceivedTitle(view, title)
+                    if (!title.isNullOrBlank()) {
+                        this@BrowserViewModel.onPageFinished(
+                            url = view?.url ?: "",
+                            title = title,
+                            canBack = view?.canGoBack() ?: false,
+                            canForward = view?.canGoForward() ?: false
+                        )
+                    }
+                }
+            }
+        }
+
+        persistentWebView = newWebView
+        return newWebView
+    }
+
+    fun saveWebViewState(view: WebView? = persistentWebView) {
+        try {
+            view?.saveState(webViewStateBundle)
+        } catch (_: Exception) {}
+    }
+
+    fun restoreWebViewState(view: WebView? = persistentWebView) {
+        try {
+            if (!webViewStateBundle.isEmpty && view?.url.isNullOrBlank()) {
+                view?.restoreState(webViewStateBundle)
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun loadUrlInWebView(target: String) {
+        val processed = target.trim()
+        if (processed.isEmpty()) return
+        navigateToUrl(processed)
+        val finalUrl = _currentUrl.value
+        if (finalUrl.isNotBlank()) {
+            persistentWebView?.loadUrl(finalUrl)
+        }
+    }
+
+    fun destroyWebView() {
+        try {
+            persistentWebView?.let {
+                it.stopLoading()
+                (it.parent as? ViewGroup)?.removeView(it)
+                it.destroy()
+            }
+        } catch (_: Exception) {}
+        persistentWebView = null
+        webViewStateBundle.clear()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        destroyWebView()
+    }
 
     private val database = AppDatabase.getInstance(application)
     val downloadRepository: DownloadRepository = DownloadRepositoryImpl(database.downloadDao())
@@ -161,19 +393,212 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private val _downloadToastMessage = MutableStateFlow<String?>(null)
     val downloadToastMessage: StateFlow<String?> = _downloadToastMessage.asStateFlow()
 
+    private val _hasActivePlayingVideo = MutableStateFlow(false)
+    val hasActivePlayingVideo: StateFlow<Boolean> = _hasActivePlayingVideo.asStateFlow()
+
     // Sniffer Engine instance
-    val snifferEngine = VideoSnifferEngine(context = application) { detectedCanonical ->
-        viewModelScope.launch {
-            val current = _sniffedMediaList.value
-            val hasRichNativeMedia = current.any { it.qualities.any { q -> q.isYoutubeDl } }
-            if (!hasRichNativeMedia) {
-                val deduplicatedQualities = deduplicateAndSortQualities(detectedCanonical.qualities)
-                val cleanCanonical = detectedCanonical.copy(qualities = deduplicatedQualities)
-                _detectedVideoQualities.value = deduplicatedQualities
-                _sniffedMediaList.value = listOf(cleanCanonical)
-                _selectedMedia.value = cleanCanonical
+    val snifferEngine = VideoSnifferEngine(
+        context = application,
+        onMediaDetected = { detectedItem ->
+            viewModelScope.launch {
+                // When an active video is already playing, prevent background videos or ads from accumulating
+                if (_hasActivePlayingVideo.value) {
+                    val currentActive = _selectedMedia.value
+                    if (currentActive != null && isSameVideo(currentActive, detectedItem)) {
+                        addOrUpdateSniffedMedia(detectedItem, makeActive = false)
+                    }
+                    return@launch
+                }
+                val current = _sniffedMediaList.value
+                val hasRichNativeMedia = current.any { it.qualities.any { q -> q.isYoutubeDl } }
+                if (!hasRichNativeMedia) {
+                    addOrUpdateSniffedMedia(detectedItem, makeActive = false)
+                }
             }
         }
+    ).apply {
+        onActivePlayStarted = { url, _ ->
+            viewModelScope.launch {
+                _hasActivePlayingVideo.value = true
+                val currentActive = _selectedMedia.value
+                val isSame = currentActive?.let {
+                    normalizeMediaUrl(it.url) == normalizeMediaUrl(url) ||
+                    (it.isM3u8 && url.contains(".m3u8", ignoreCase = true) && isSameHlsStream(it.url, url))
+                } ?: false
+                if (!isSame) {
+                    // Replace on Active Play:
+                    // Instantly purge all previous background/preview videos from ViewModel & reset counter
+                    _sniffedMediaList.value = emptyList()
+                    _selectedMedia.value = null
+                    _detectedVideoQualities.value = emptyList()
+                }
+            }
+        }
+        onActiveMediaDetected = { activeItem ->
+            viewModelScope.launch {
+                _hasActivePlayingVideo.value = true
+                replaceOnActivePlay(activeItem)
+            }
+        }
+    }
+
+    private fun normalizeMediaUrl(url: String): String {
+        return url.substringBefore('?').substringBefore('#').trim().lowercase()
+    }
+
+    private fun isSameHlsStream(url1: String, url2: String): Boolean {
+        val norm1 = normalizeMediaUrl(url1)
+        val norm2 = normalizeMediaUrl(url2)
+        if (norm1 == norm2) return true
+        val dir1 = norm1.substringBeforeLast('/')
+        val dir2 = norm2.substringBeforeLast('/')
+        return dir1.isNotBlank() && dir1 == dir2
+    }
+
+    private fun isSameVideo(v1: SniffedMediaItem, v2: SniffedMediaItem): Boolean {
+        if (v1.id == v2.id) return true
+        val norm1 = normalizeMediaUrl(v1.url)
+        val norm2 = normalizeMediaUrl(v2.url)
+        if (norm1 == norm2) return true
+        if (v1.isM3u8 && v2.isM3u8 && isSameHlsStream(v1.url, v2.url)) return true
+        return false
+    }
+
+    fun replaceOnActivePlay(mediaItem: SniffedMediaItem) {
+        val cleanUrl = mediaItem.url.substringBefore('?').substringBefore('#').lowercase()
+        // 1. Strictly ignore partial segments and subtitle fragments
+        if (cleanUrl.endsWith(".ts") || cleanUrl.endsWith(".m4s") || cleanUrl.endsWith(".vtt") ||
+            cleanUrl.endsWith(".key") || cleanUrl.endsWith(".cmfa") || cleanUrl.endsWith(".cmfv") ||
+            cleanUrl.endsWith(".init")
+        ) {
+            return
+        }
+
+        // 2. Minimum size validation for direct video files:
+        val isAudio = mediaItem.mimeType.contains("audio", ignoreCase = true) ||
+                mediaItem.url.contains(".mp3", ignoreCase = true) ||
+                mediaItem.url.contains(".m4a", ignoreCase = true)
+        if (!mediaItem.isM3u8 && !mediaItem.isDash && !isAudio && mediaItem.fileSizeBytes in 1 until (1024 * 1024L)) {
+            return
+        }
+
+        val deduplicatedQualities = deduplicateAndSortQualities(mediaItem.qualities)
+        val sanitizedSize = if (mediaItem.isM3u8 || mediaItem.isDash) {
+            if (mediaItem.fileSizeBytes >= 1024 * 1024L) mediaItem.fileSizeBytes else 0L
+        } else {
+            mediaItem.fileSizeBytes
+        }
+        val cleanItem = mediaItem.copy(
+            fileSizeBytes = sanitizedSize,
+            qualities = deduplicatedQualities
+        )
+
+        val currentActive = _selectedMedia.value
+        if (currentActive != null && isSameVideo(currentActive, cleanItem)) {
+            // Same active video: update/merge qualities
+            val mergedQualities = deduplicateAndSortQualities(currentActive.qualities + cleanItem.qualities)
+            val updated = currentActive.copy(
+                title = if (currentActive.displayTitle.isNotBlank() && !currentActive.displayTitle.startsWith("video_")) currentActive.title else cleanItem.title,
+                thumbnailUrl = cleanItem.thumbnailUrl ?: currentActive.thumbnailUrl,
+                durationSeconds = maxOf(currentActive.durationSeconds, cleanItem.durationSeconds),
+                fileSizeBytes = maxOf(currentActive.fileSizeBytes, cleanItem.fileSizeBytes),
+                qualities = mergedQualities,
+                isM3u8 = currentActive.isM3u8 || cleanItem.isM3u8,
+                isDash = currentActive.isDash || cleanItem.isDash,
+                headers = currentActive.headers + cleanItem.headers
+            )
+            _sniffedMediaList.value = listOf(updated)
+            _selectedMedia.value = updated
+            _detectedVideoQualities.value = mergedQualities
+        } else {
+            // Replace on Active Play:
+            // Purge all previous background/preview videos, reset counter, and store ONLY this new active video
+            _sniffedMediaList.value = listOf(cleanItem)
+            _selectedMedia.value = cleanItem
+            _detectedVideoQualities.value = deduplicatedQualities
+        }
+    }
+
+    fun addOrUpdateSniffedMedia(mediaItem: SniffedMediaItem, makeActive: Boolean = false) {
+        val cleanUrl = mediaItem.url.substringBefore('?').substringBefore('#').lowercase()
+        // 1. Strictly ignore partial segments and subtitle fragments
+        if (cleanUrl.endsWith(".ts") || cleanUrl.endsWith(".m4s") || cleanUrl.endsWith(".vtt") ||
+            cleanUrl.endsWith(".key") || cleanUrl.endsWith(".cmfa") || cleanUrl.endsWith(".cmfv") ||
+            cleanUrl.endsWith(".init")
+        ) {
+            return
+        }
+
+        // 2. Minimum size validation for direct video files:
+        // Files under 1 MB are tracking pixels, previews, stickers, or server errors
+        val isAudio = mediaItem.mimeType.contains("audio", ignoreCase = true) ||
+                mediaItem.url.contains(".mp3", ignoreCase = true) ||
+                mediaItem.url.contains(".m4a", ignoreCase = true)
+        if (!mediaItem.isM3u8 && !mediaItem.isDash && !isAudio && mediaItem.fileSizeBytes in 1 until (1024 * 1024L)) {
+            return
+        }
+
+        val currentList = _sniffedMediaList.value.toMutableList()
+        val normalizedNew = normalizeMediaUrl(mediaItem.url)
+
+        val existingIndex = currentList.indexOfFirst { existing ->
+            existing.id == mediaItem.id ||
+            normalizeMediaUrl(existing.url) == normalizedNew ||
+            (existing.isM3u8 && mediaItem.isM3u8 && isSameHlsStream(existing.url, mediaItem.url))
+        }
+
+        val deduplicatedQualities = deduplicateAndSortQualities(mediaItem.qualities)
+        val sanitizedSize = if (mediaItem.isM3u8 || mediaItem.isDash) {
+            if (mediaItem.fileSizeBytes >= 1024 * 1024L) mediaItem.fileSizeBytes else 0L
+        } else {
+            mediaItem.fileSizeBytes
+        }
+        val cleanItem = mediaItem.copy(
+            fileSizeBytes = sanitizedSize,
+            qualities = deduplicatedQualities
+        )
+
+        if (existingIndex >= 0) {
+            val existing = currentList[existingIndex]
+            val mergedQualities = deduplicateAndSortQualities(existing.qualities + cleanItem.qualities)
+            val updated = existing.copy(
+                title = if (existing.displayTitle.isNotBlank() && !existing.displayTitle.startsWith("video_")) existing.title else cleanItem.title,
+                thumbnailUrl = cleanItem.thumbnailUrl ?: existing.thumbnailUrl,
+                durationSeconds = maxOf(existing.durationSeconds, cleanItem.durationSeconds),
+                fileSizeBytes = maxOf(existing.fileSizeBytes, cleanItem.fileSizeBytes),
+                qualities = mergedQualities,
+                isM3u8 = existing.isM3u8 || cleanItem.isM3u8,
+                isDash = existing.isDash || cleanItem.isDash,
+                headers = existing.headers + cleanItem.headers
+            )
+            if (makeActive) {
+                currentList.removeAt(existingIndex)
+                currentList.add(0, updated)
+                _selectedMedia.value = updated
+                _detectedVideoQualities.value = mergedQualities
+            } else {
+                currentList[existingIndex] = updated
+                if (_selectedMedia.value?.id == existing.id || _selectedMedia.value == null) {
+                    _selectedMedia.value = updated
+                    _detectedVideoQualities.value = mergedQualities
+                }
+            }
+        } else {
+            // New distinct video detected!
+            if (makeActive) {
+                currentList.add(0, cleanItem)
+                _selectedMedia.value = cleanItem
+                _detectedVideoQualities.value = deduplicatedQualities
+            } else {
+                currentList.add(cleanItem)
+                if (_selectedMedia.value == null) {
+                    _selectedMedia.value = cleanItem
+                    _detectedVideoQualities.value = deduplicatedQualities
+                }
+            }
+        }
+
+        _sniffedMediaList.value = currentList
     }
 
     fun onUrlInputChanged(newQuery: String) {
@@ -230,6 +655,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _isLoading.value = true
         _inputUrl.value = url
         _currentUrl.value = url
+        _hasActivePlayingVideo.value = false
+        clearSniffedMedia()
         snifferEngine.updateCurrentPageInfo(url, null)
     }
 
@@ -263,7 +690,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun toggleDesktopMode() {
-        _isDesktopMode.value = !_isDesktopMode.value
+        val newMode = !_isDesktopMode.value
+        _isDesktopMode.value = newMode
+        persistentWebView?.let { view ->
+            view.settings.userAgentString = if (newMode) DESKTOP_USER_AGENT else null
+            view.reload()
+        }
     }
 
     fun incrementBlockedAds() {
@@ -292,11 +724,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     fun addNewTab() {
         _tabCount.value += 1
+        persistentWebView?.loadUrl("about:blank")
+        webViewStateBundle.clear()
         resetToHome()
     }
 
     fun clearSniffedMedia() {
         _isExtractingNativeMedia.value = false
+        _hasActivePlayingVideo.value = false
         _sniffedMediaList.value = emptyList()
         _selectedMedia.value = null
         _detectedVideoQualities.value = emptyList()

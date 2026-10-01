@@ -70,14 +70,26 @@ data class SniffedMediaItem(
 
     val bestFileSizeBytes: Long
         get() {
-            if (fileSizeBytes > 0L) return fileSizeBytes
-            val qualitySize = qualities.firstOrNull()?.estimatedSizeBytes ?: 0L
-            if (qualitySize > 0L) return qualitySize
+            // For HLS/DASH streams, never treat the manifest text size (< 1 MB) as video file size
+            if (isM3u8 || isDash) {
+                val qualitySize = qualities.firstOrNull { it.estimatedSizeBytes >= 1024 * 1024L }?.estimatedSizeBytes ?: 0L
+                if (qualitySize >= 1024 * 1024L) return qualitySize
+                if (fileSizeBytes >= 1024 * 1024L) return fileSizeBytes
+                return 0L
+            }
+            if (fileSizeBytes >= 1024 * 1024L) return fileSizeBytes
+            val qualitySize = qualities.firstOrNull { it.estimatedSizeBytes >= 1024 * 1024L }?.estimatedSizeBytes ?: 0L
+            if (qualitySize >= 1024 * 1024L) return qualitySize
             return 0L
         }
 
     val bestFormattedSize: String
-        get() = if (bestFileSizeBytes > 0L) VideoQualityOption.formatFileSize(bestFileSizeBytes) else ""
+        get() {
+            if (bestFileSizeBytes >= 1024 * 1024L) {
+                return VideoQualityOption.formatFileSize(bestFileSizeBytes)
+            }
+            return if (isM3u8) "استریم HLS" else if (isDash) "استریم DASH" else "محاسبه حین دانلود"
+        }
 
     companion object {
         fun extractFileNameFromUrl(url: String): String {

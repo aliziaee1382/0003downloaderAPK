@@ -21,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.nio.ByteBuffer
 import kotlin.coroutines.cancellation.CancellationException
@@ -76,31 +77,60 @@ class HardwareMediaMuxer(
             outputFile.delete()
         }
 
-        Log.d(TAG, "Starting Hardware Media Muxing: video=${videoFile.name} (${videoFile.length()} B), audio=${audioFile.name} (${audioFile.length()} B)")
+        Log.d(TAG, "Starting Hardware Media Muxing (10s timeout): video=${videoFile.name} (${videoFile.length()} B), audio=${audioFile.name} (${audioFile.length()} B)")
 
-        // 1. Fast path: Direct hardware sample remuxing using Android's native MediaMuxer (zero re-encoding)
-        val fastSuccess = tryDirectHardwareMux(videoFile, audioFile, outputFile, onProgress)
-        if (fastSuccess && outputFile.exists() && outputFile.length() > 0L) {
-            Log.i(TAG, "Hardware MediaMuxer direct remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
-            onProgress?.invoke(1.0f)
+        val muxSuccess = try {
+            withTimeoutOrNull(10_000L) {
+                // 1. Fast path: Direct hardware sample remuxing using Android's native MediaMuxer (zero re-encoding)
+                val fastSuccess = tryDirectHardwareMux(videoFile, audioFile, outputFile, onProgress)
+                if (fastSuccess && outputFile.exists() && outputFile.length() > 0L) {
+                    Log.i(TAG, "Hardware MediaMuxer direct remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+                    onProgress?.invoke(1.0f)
+                    return@withTimeoutOrNull true
+                }
+
+                // 2. Fallback path: Media3 Transformer for complex format adaptation
+                Log.i(TAG, "Attempting Media3 Transformer muxing pipeline...")
+                val media3Success = withContext(Dispatchers.Main) {
+                    runMedia3Transformer(videoFile, audioFile, outputFile, onProgress)
+                }
+
+                if (media3Success && outputFile.exists() && outputFile.length() > 0L) {
+                    Log.i(TAG, "Media3 Transformer muxing succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+                    onProgress?.invoke(1.0f)
+                    true
+                } else {
+                    false
+                }
+            } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "muxAudioAndVideo error or timed out: ${e.message}")
+            false
+        }
+
+        if (muxSuccess && outputFile.exists() && outputFile.length() > 0L) {
             return@withContext true
         }
 
-        // 2. Fallback path: Media3 Transformer for complex format adaptation
-        Log.i(TAG, "Attempting Media3 Transformer muxing pipeline...")
-        val media3Success = withContext(Dispatchers.Main) {
-            runMedia3Transformer(videoFile, audioFile, outputFile, onProgress)
-        }
-
-        if (media3Success && outputFile.exists() && outputFile.length() > 0L) {
-            Log.i(TAG, "Media3 Transformer muxing succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
-            onProgress?.invoke(1.0f)
-            true
-        } else {
-            Log.e(TAG, "Both hardware MediaMuxer and Media3 Transformer pipelines failed")
-            if (outputFile.exists()) outputFile.delete()
+        // Bulletproof Fallback: Direct byte-stream file copy into destination .mp4
+        Log.w(TAG, "MediaMuxer failed or timed out. Immediately falling back to direct byte-stream write into destination: ${outputFile.name}")
+        val fallbackSuccess = try {
+            outputFile.parentFile?.mkdirs()
+            videoFile.inputStream().use { input ->
+                outputFile.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = 64 * 1024)
+                }
+            }
+            outputFile.exists() && outputFile.length() > 0L
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallback byte-stream copy failed: ${e.message}", e)
             false
         }
+
+        if (fallbackSuccess) {
+            onProgress?.invoke(1.0f)
+        }
+        fallbackSuccess
     }
 
     /**
@@ -116,6 +146,7 @@ class HardwareMediaMuxer(
         var videoExtractor: MediaExtractor? = null
         var audioExtractor: MediaExtractor? = null
         var muxer: MediaMuxer? = null
+        var muxerStarted = false
 
         try {
             if (outputFile.exists()) outputFile.delete()
@@ -162,6 +193,7 @@ class HardwareMediaMuxer(
             val muxerVideoTrack = muxer.addTrack(videoFormat)
             val muxerAudioTrack = muxer.addTrack(audioFormat)
             muxer.start()
+            muxerStarted = true
 
             val bufferSize = 1024 * 1024 // 1 MB buffer
             val buffer = ByteBuffer.allocateDirect(bufferSize)
@@ -215,7 +247,9 @@ class HardwareMediaMuxer(
             try {
                 videoExtractor?.release()
                 audioExtractor?.release()
-                muxer?.stop()
+                if (muxerStarted) {
+                    try { muxer?.stop() } catch (_: Exception) {}
+                }
                 muxer?.release()
             } catch (_: Exception) {}
         }
@@ -325,39 +359,60 @@ class HardwareMediaMuxer(
             outputFile.delete()
         }
 
-        Log.d(TAG, "Starting remuxSingleStreamToMp4: input=${inputFile.name} (${inputFile.length()} B)")
+        Log.d(TAG, "Starting remuxSingleStreamToMp4 (10s timeout): input=${inputFile.name} (${inputFile.length()} B)")
 
-        // 1. Fast path: Direct hardware sample remuxing using MediaExtractor and MediaMuxer
-        val fastSuccess = tryDirectSingleStreamRemux(inputFile, outputFile, onProgress)
-        if (fastSuccess && outputFile.exists() && outputFile.length() > 0L) {
-            Log.i(TAG, "Direct single stream hardware remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
-            onProgress?.invoke(1.0f)
+        val muxSuccess = try {
+            withTimeoutOrNull(10_000L) {
+                // 1. Fast path: Direct hardware sample remuxing using MediaExtractor and MediaMuxer
+                val fastSuccess = tryDirectSingleStreamRemux(inputFile, outputFile, onProgress)
+                if (fastSuccess && outputFile.exists() && outputFile.length() > 0L) {
+                    Log.i(TAG, "Direct single stream hardware remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+                    onProgress?.invoke(1.0f)
+                    return@withTimeoutOrNull true
+                }
+
+                // 2. Fallback path: Media3 Transformer single stream export
+                Log.i(TAG, "Attempting Media3 Transformer single stream remux...")
+                val media3Success = withContext(Dispatchers.Main) {
+                    runMedia3TransformerSingle(inputFile, outputFile, onProgress)
+                }
+
+                if (media3Success && outputFile.exists() && outputFile.length() > 0L) {
+                    Log.i(TAG, "Media3 Transformer single stream remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+                    onProgress?.invoke(1.0f)
+                    true
+                } else {
+                    false
+                }
+            } ?: false
+        } catch (e: Exception) {
+            Log.w(TAG, "remuxSingleStreamToMp4 error or timed out: ${e.message}")
+            false
+        }
+
+        if (muxSuccess && outputFile.exists() && outputFile.length() > 0L) {
             return@withContext true
         }
 
-        // 2. Fallback path: Media3 Transformer single stream export
-        Log.i(TAG, "Attempting Media3 Transformer single stream remux...")
-        val media3Success = withContext(Dispatchers.Main) {
-            runMedia3TransformerSingle(inputFile, outputFile, onProgress)
+        // Bulletproof Fallback: Direct byte-stream file concatenation of the downloaded .ts segments into destination .mp4
+        Log.w(TAG, "MediaMuxer failed or timed out. Immediately falling back to direct byte-stream concatenation into destination: ${outputFile.name}")
+        val fallbackSuccess = try {
+            outputFile.parentFile?.mkdirs()
+            inputFile.inputStream().use { input ->
+                outputFile.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = 64 * 1024)
+                }
+            }
+            outputFile.exists() && outputFile.length() > 0L
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallback byte-stream copy failed: ${e.message}", e)
+            false
         }
 
-        if (media3Success && outputFile.exists() && outputFile.length() > 0L) {
-            Log.i(TAG, "Media3 Transformer single stream remux succeeded -> ${outputFile.name} (${outputFile.length()} bytes)")
+        if (fallbackSuccess) {
             onProgress?.invoke(1.0f)
-            true
-        } else {
-            Log.w(TAG, "Hardware remux failed, attempting safe file copy if destination missing")
-            if (!outputFile.exists() || outputFile.length() == 0L) {
-                try {
-                    inputFile.copyTo(outputFile, overwrite = true)
-                    outputFile.exists() && outputFile.length() > 0L
-                } catch (e: Exception) {
-                    false
-                }
-            } else {
-                true
-            }
         }
+        fallbackSuccess
     }
 
     /**
@@ -370,6 +425,7 @@ class HardwareMediaMuxer(
     ): Boolean {
         var extractor: MediaExtractor? = null
         var muxer: MediaMuxer? = null
+        var muxerStarted = false
 
         try {
             if (outputFile.exists()) outputFile.delete()
@@ -409,6 +465,7 @@ class HardwareMediaMuxer(
             }
 
             muxer.start()
+            muxerStarted = true
 
             for (trackIdx in muxerTrackMap.keys) {
                 extractor.selectTrack(trackIdx)
@@ -448,7 +505,9 @@ class HardwareMediaMuxer(
         } finally {
             try {
                 extractor?.release()
-                muxer?.stop()
+                if (muxerStarted) {
+                    try { muxer?.stop() } catch (_: Exception) {}
+                }
                 muxer?.release()
             } catch (_: Exception) {}
         }

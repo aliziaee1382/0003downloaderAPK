@@ -63,7 +63,7 @@ class Phase2SnifferTest {
         assertTrue(highest.isHlsVariant)
         assertTrue(highest.label.contains("1080p"))
         assertEquals(0L, highest.estimatedSizeBytes)
-        assertEquals("Adaptive HLS", highest.formattedSize)
+        assertEquals("استریم HLS", highest.formattedSize)
 
         val lowest = qualities[2]
         assertEquals("640x360", lowest.resolution)
