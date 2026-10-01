@@ -167,6 +167,93 @@ class ChunkDownloader(
 
             return map
         }
+
+        /**
+         * Robust parser to extract direct playable video stream URLs from JSON API responses.
+         * Searches for standard media keys ("url", "video_url", "stream", "file", "src", "videoUrl", "playback_url", etc.)
+         * across both top-level and nested structures, with regex fallback.
+         */
+        fun extractVideoUrlFromJson(jsonStr: String): String? {
+            if (jsonStr.isBlank()) return null
+            val candidateKeys = listOf(
+                "url", "video_url", "stream", "file", "src", "videoUrl",
+                "playback_url", "source", "download_url", "link", "media_url",
+                "stream_url", "play_url", "hls_url", "mp4_url"
+            )
+
+            fun isValidMediaUrl(u: String?): Boolean {
+                if (u.isNullOrBlank()) return false
+                val trimmed = u.trim()
+                return trimmed.startsWith("http://", ignoreCase = true) ||
+                        trimmed.startsWith("https://", ignoreCase = true)
+            }
+
+            try {
+                val trimmed = jsonStr.trim()
+                if (trimmed.startsWith("{")) {
+                    val root = JSONObject(trimmed)
+                    for (k in candidateKeys) {
+                        val v = root.optString(k, "")
+                        if (isValidMediaUrl(v)) return v
+                    }
+
+                    fun searchJson(obj: Any?): String? {
+                        when (obj) {
+                            is JSONObject -> {
+                                for (k in candidateKeys) {
+                                    val v = obj.optString(k, "")
+                                    if (isValidMediaUrl(v)) return v
+                                }
+                                val it = obj.keys()
+                                while (it.hasNext()) {
+                                    val key = it.next()
+                                    val child = obj.opt(key)
+                                    val found = searchJson(child)
+                                    if (found != null) return found
+                                }
+                            }
+                            is org.json.JSONArray -> {
+                                for (i in 0 until obj.length()) {
+                                    val found = searchJson(obj.opt(i))
+                                    if (found != null) return found
+                                }
+                            }
+                        }
+                        return null
+                    }
+
+                    val found = searchJson(root)
+                    if (found != null) return found
+                } else if (trimmed.startsWith("[")) {
+                    val arr = org.json.JSONArray(trimmed)
+                    for (i in 0 until arr.length()) {
+                        val item = arr.opt(i)
+                        if (item is JSONObject) {
+                            for (k in candidateKeys) {
+                                val v = item.optString(k, "")
+                                if (isValidMediaUrl(v)) return v
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed parsing JSON for video URL: ${e.message}")
+            }
+
+            try {
+                val regex = Regex(
+                    """\"(?:url|video_url|stream|file|src|videoUrl|playback_url|source|download_url)\"\s*:\s*\"(https?:\\?/\\?/[^\"]+)\"""",
+                    RegexOption.IGNORE_CASE
+                )
+                val match = regex.find(jsonStr)
+                if (match != null) {
+                    val rawUrl = match.groupValues[1].replace("\\/", "/")
+                    if (isValidMediaUrl(rawUrl)) return rawUrl
+                }
+            } catch (_: Exception) {}
+
+            return null
+        }
     }
 
     fun parseHeaders(
@@ -354,6 +441,27 @@ class ChunkDownloader(
         }
     }.flowOn(Dispatchers.IO)
 
+    private fun mergeCookieStrings(vararg cookieStrings: String?): String {
+        val cookieMap = linkedMapOf<String, String>()
+        for (cs in cookieStrings) {
+            if (cs.isNullOrBlank()) continue
+            val parts = cs.split(";")
+            for (part in parts) {
+                val trimmed = part.trim()
+                if (trimmed.isEmpty()) continue
+                val equalIdx = trimmed.indexOf('=')
+                if (equalIdx > 0) {
+                    val key = trimmed.substring(0, equalIdx).trim()
+                    val value = trimmed.substring(equalIdx + 1).trim()
+                    cookieMap[key] = value
+                } else {
+                    cookieMap[trimmed] = ""
+                }
+            }
+        }
+        return cookieMap.entries.joinToString("; ") { (k, v) -> if (v.isNotEmpty()) "$k=$v" else k }
+    }
+
     private fun applyBrowserContextHeaders(
         builder: Request.Builder,
         headers: Map<String, String>,
@@ -362,6 +470,36 @@ class ChunkDownloader(
     ) {
         val mergedHeaders = Companion.parseHeaders(null, targetUrl, websiteUrl).toMutableMap()
         mergedHeaders.putAll(headers)
+
+        // 1. Fetch live fresh session cookies from CookieManager for source domain and destination domain
+        val effectiveWebsite = when {
+            !websiteUrl.isNullOrBlank() -> websiteUrl
+            headers.containsKey("webpageUrl") -> headers["webpageUrl"]
+            headers.containsKey("Referer") -> headers["Referer"]
+            headers.containsKey("referer") -> headers["referer"]
+            else -> null
+        }
+
+        var liveOriginCookie: String? = null
+        var liveTargetCookie: String? = null
+        try {
+            val cm = android.webkit.CookieManager.getInstance()
+            if (!effectiveWebsite.isNullOrBlank()) {
+                liveOriginCookie = cm.getCookie(effectiveWebsite)
+            }
+            if (targetUrl.isNotBlank()) {
+                liveTargetCookie = cm.getCookie(targetUrl)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not fetch CookieManager cookies: ${e.message}")
+        }
+
+        val existingCookie = mergedHeaders["Cookie"] ?: mergedHeaders["cookie"]
+        val finalCookie = mergeCookieStrings(existingCookie, liveOriginCookie, liveTargetCookie)
+        if (finalCookie.isNotBlank()) {
+            mergedHeaders["Cookie"] = finalCookie
+            mergedHeaders.remove("cookie")
+        }
 
         mergedHeaders.forEach { (k, v) ->
             val lk = k.lowercase()
@@ -378,6 +516,12 @@ class ChunkDownloader(
                 } catch (_: Exception) {}
             }
         }
+
+        // 2. Video player emulation headers to make CDN treat download requests like in-browser video playback
+        builder.header("Accept", "*/*")
+        builder.header("Sec-Fetch-Dest", "video")
+        builder.header("Sec-Fetch-Mode", "no-cors")
+        builder.header("Sec-Fetch-Site", "cross-site")
 
         // Strictly purge any Range or Content-Length headers so requests never get clipped to tiny ranges
         builder.removeHeader("Range")
@@ -402,8 +546,13 @@ class ChunkDownloader(
             applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
             requestBuilder.header("Range", "bytes=0-1023")
             requestBuilder.header("Connection", "close")
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            response.use { res ->
+            okHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+                val ct = (res.header("Content-Type") ?: "").lowercase()
+                if (ct.contains("application/json") || ct.contains("text/javascript")) {
+                    Log.d(TAG, "probeServer: $url returned JSON ($ct), delegating directly to downloadSingleStream")
+                    return ServerProbeResult(-1L, false)
+                }
+
                 if (res.code == 206) {
                     val contentRange = res.header("Content-Range")
                     val total = contentRange?.substringAfterLast("/")?.trim()?.toLongOrNull() ?: -1L
@@ -501,12 +650,46 @@ class ChunkDownloader(
         val call = okHttpClient.newCall(requestBuilder.build())
         val response = call.execute()
         if (!response.isSuccessful) {
-            throw java.io.IOException("HTTP error ${response.code} downloading stream from $url")
+            val errorBody = try {
+                response.body?.string() ?: "<empty body>"
+            } catch (e: Exception) {
+                "<failed to read body: ${e.message}>"
+            }
+            val responseHeaders = response.headers.toMultimap().entries.joinToString("; ") { "${it.key}=${it.value}" }
+            Log.e(TAG, "HTTP error ${response.code} downloading stream from $url. Response headers: [$responseHeaders], Response body: $errorBody")
+            throw java.io.IOException("HTTP error ${response.code} downloading stream from $url: $errorBody")
         }
 
         val body = response.body ?: throw java.io.IOException("Empty response body from $url")
         val contentType = (response.header("Content-Type") ?: "").lowercase()
-        if (contentType.contains("text/html") || contentType.contains("application/json")) {
+
+        // 1. Support API Endpoints returning JSON with real direct video URLs
+        if (contentType.contains("application/json") || contentType.contains("text/javascript")) {
+            val jsonBody = try {
+                body.string()
+            } catch (e: Exception) {
+                throw java.io.IOException("Failed reading JSON response body from $url: ${e.message}")
+            }
+
+            Log.d(TAG, "Server returned JSON response ($contentType) for $url: ${jsonBody.take(400)}")
+            val extractedMediaUrl = extractVideoUrlFromJson(jsonBody)
+            if (!extractedMediaUrl.isNullOrBlank() && extractedMediaUrl != url) {
+                Log.e(TAG, "Extracted real media stream URL from API JSON: $extractedMediaUrl (replacing: $url)")
+                return downloadSingleStream(
+                    url = extractedMediaUrl,
+                    headers = headers,
+                    websiteUrl = websiteUrl,
+                    outputFile = outputFile,
+                    totalBytesEstimated = totalBytesEstimated,
+                    onProgress = onProgress
+                )
+            } else {
+                Log.e(TAG, "Server returned JSON without a recognized media URL: ${jsonBody.take(300)}")
+                throw java.io.IOException("Server returned non-media page ($contentType) instead of video content")
+            }
+        }
+
+        if (contentType.contains("text/html")) {
             throw java.io.IOException("Server returned non-media page ($contentType) instead of video content")
         }
 

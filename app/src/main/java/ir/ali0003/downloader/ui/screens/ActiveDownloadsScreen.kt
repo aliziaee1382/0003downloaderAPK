@@ -77,6 +77,22 @@ fun ActiveDownloadsScreen(
     onSimulate: () -> Unit = {}
 ) {
     var showManualDialog by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+
+    // Observe progressMap for any failed downloads and display error toast immediately
+    androidx.compose.runtime.LaunchedEffect(progressMap) {
+        progressMap.forEach { (taskId, progress) ->
+            if (progress.isFailed && !progress.errorMessage.isNullOrBlank()) {
+                val task = downloads.find { it.id == taskId }
+                val taskName = task?.fileName ?: "Task #$taskId"
+                android.widget.Toast.makeText(
+                    context,
+                    "خطای دانلود ($taskName): ${progress.errorMessage}",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
 
     // Filter active items strictly: any task with status COMPLETED or progress >= 1.0f immediately vacates the active screen
     val activeTasks = remember(downloads, progressMap) {

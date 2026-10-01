@@ -3,6 +3,7 @@ package ir.ali0003.downloader.browser.sniffer
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -929,16 +930,42 @@ class VideoSnifferEngine(
                 detectedSize = if (genuineHlsSize >= 1024 * 1024L) genuineHlsSize else 0L
             } else {
                 // Direct video link (MP4 / WebM) - 2-phase probe (HEAD fallback to Range: bytes=0-1)
+                var resolvedMediaUrl = mediaUrl
                 val probe = probeMediaHeadersAndSize(mediaUrl, fullHeaders)
                 detectedSize = probe.sizeBytes
                 probe.mimeType?.let { if (it.isNotBlank()) detectedMime = it }
 
+                // Check if server returned application/json (API endpoint returning media URL)
+                if (detectedMime.contains("application/json", ignoreCase = true) ||
+                    detectedMime.contains("text/javascript", ignoreCase = true) ||
+                    mediaUrl.contains(".json", ignoreCase = true)
+                ) {
+                    val extractedMediaUrl = tryFetchAndExtractMediaUrl(mediaUrl, fullHeaders)
+                    if (!extractedMediaUrl.isNullOrBlank() && extractedMediaUrl != mediaUrl) {
+                        Log.e(TAG, "VideoSnifferEngine: Extracted genuine video URL from JSON API: $extractedMediaUrl (API endpoint: $mediaUrl)")
+                        resolvedMediaUrl = extractedMediaUrl
+                        // Re-probe genuine media URL
+                        val realProbe = probeMediaHeadersAndSize(resolvedMediaUrl, fullHeaders)
+                        detectedSize = realProbe.sizeBytes
+                        if (!realProbe.mimeType.isNullOrBlank()) {
+                            detectedMime = realProbe.mimeType!!
+                        } else {
+                            detectedMime = if (resolvedMediaUrl.contains(".m3u8", ignoreCase = true)) "application/x-mpegURL" else "video/mp4"
+                        }
+                    } else {
+                        // Crucial: If response is application/json and NO media URL could be extracted,
+                        // do NOT put the raw API endpoint URL in VideoQualityOption!
+                        Log.w(TAG, "VideoSnifferEngine: Discarding non-media JSON API endpoint without playable stream: $mediaUrl")
+                        return@launch
+                    }
+                }
+
                 val isAudio = detectedMime.contains("audio", ignoreCase = true) ||
-                        mediaUrl.contains(".mp3", ignoreCase = true) ||
-                        mediaUrl.contains(".m4a", ignoreCase = true)
+                        resolvedMediaUrl.contains(".mp3", ignoreCase = true) ||
+                        resolvedMediaUrl.contains(".m4a", ignoreCase = true)
 
                 // Reject text/html server error responses or non-media payloads
-                if (probe.mimeType != null && probe.mimeType!!.startsWith("text/", ignoreCase = true)) {
+                if (detectedMime.startsWith("text/", ignoreCase = true) && !detectedMime.contains("vtt")) {
                     return@launch
                 }
 
@@ -950,7 +977,7 @@ class VideoSnifferEngine(
 
                 // Filter Out Micro-Clips & Thumbnail Previews (unless triggered by an active play event):
                 // Discard background preview MP4s matching common patterns under 1 MB
-                val isPreview = isThumbnailOrPreviewUrl(mediaUrl)
+                val isPreview = isThumbnailOrPreviewUrl(resolvedMediaUrl)
                 if (!isAudio && isPreview && (detectedSize in 0 until (1024 * 1024L) || (finalDuration in 0.001..9.999))) {
                     return@launch
                 }
@@ -967,13 +994,13 @@ class VideoSnifferEngine(
                 }
 
                 val formatTag = when {
-                    detectedMime.contains("webm", ignoreCase = true) || mediaUrl.contains(".webm", ignoreCase = true) -> "WEBM"
+                    detectedMime.contains("webm", ignoreCase = true) || resolvedMediaUrl.contains(".webm", ignoreCase = true) -> "WEBM"
                     isAudio -> "AUDIO"
                     else -> "MP4"
                 }
 
                 val singleOption = createGenuineDirectQualityOption(
-                    mediaUrl = mediaUrl,
+                    mediaUrl = resolvedMediaUrl,
                     pageTitle = pageTitle,
                     fileSizeBytes = detectedSize,
                     durationSeconds = finalDuration,
@@ -992,9 +1019,11 @@ class VideoSnifferEngine(
                         mediaUrl.contains(".mp3", ignoreCase = true) ||
                         mediaUrl.contains(".m4a", ignoreCase = true)
 
+                val effectiveTargetUrl = if (qualities.isNotEmpty()) qualities.first().url else mediaUrl
+
                 val isSameVideo = previous != null && (
-                    isSameVideoUrl(previous.url, mediaUrl) ||
-                    (previous.isM3u8 && isM3u8 && isSameHlsStream(previous.url, mediaUrl))
+                    isSameVideoUrl(previous.url, effectiveTargetUrl) ||
+                    (previous.isM3u8 && isM3u8 && isSameHlsStream(previous.url, effectiveTargetUrl))
                 )
 
                 if (isActivePlayEvent && !isSameVideo) {
@@ -1034,7 +1063,7 @@ class VideoSnifferEngine(
                     else -> false
                 }
 
-                val primaryUrl = if (shouldUseAsMasterUrl) mediaUrl else previous?.url ?: mediaUrl
+                val primaryUrl = if (shouldUseAsMasterUrl) effectiveTargetUrl else previous?.url ?: effectiveTargetUrl
                 val primaryMime = if (shouldUseAsMasterUrl) detectedMime else previous?.mimeType ?: detectedMime
                 val isMasterM3u8 = previous?.isM3u8 == true || isM3u8
                 val isMasterDash = previous?.isDash == true || isDash
@@ -1044,7 +1073,7 @@ class VideoSnifferEngine(
                 val bestBaseSize = maxOf(previous?.fileSizeBytes ?: 0L, detectedSize)
 
                 // Pick the most descriptive video title available
-                val bestTitle = pickBestTitle(previous?.title, pageTitle, mediaUrl)
+                val bestTitle = pickBestTitle(previous?.title, pageTitle, effectiveTargetUrl)
 
                 // Normalize & bucket all accumulated qualities into clean, genuine, sorted tiers
                 val standardizedQualities = normalizeAndBucketQualities(
@@ -1057,9 +1086,9 @@ class VideoSnifferEngine(
 
                 val distinctItem = SniffedMediaItem(
                     id = UUID.randomUUID().toString(),
-                    url = mediaUrl,
+                    url = effectiveTargetUrl,
                     pageUrl = if (pageUrl.isNotBlank()) pageUrl else currentPageUrl.get(),
-                    title = pickBestTitle(null, pageTitle, mediaUrl),
+                    title = pickBestTitle(null, pageTitle, effectiveTargetUrl),
                     mimeType = detectedMime,
                     isM3u8 = isM3u8,
                     isDash = isDash,
@@ -1132,6 +1161,34 @@ class VideoSnifferEngine(
     )
 
     /**
+     * Attempts to query a suspected API URL that returns JSON, extracting a genuine playable media URL.
+     */
+    private fun tryFetchAndExtractMediaUrl(
+        apiUrl: String,
+        headers: Map<String, String>
+    ): String? {
+        try {
+            val okHeaders = buildOkHttpHeaders(headers)
+            val request = Request.Builder()
+                .url(apiUrl)
+                .get()
+                .headers(okHeaders)
+                .header("Accept", "application/json, text/plain, */*")
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: return null
+                    return ir.ali0003.downloader.downloader.core.ChunkDownloader.extractVideoUrlFromJson(body)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to fetch JSON from API URL $apiUrl: ${e.message}")
+        }
+        return null
+    }
+
+    /**
      * Resilient 2-phase probe for media headers and exact Content-Length:
      * Phase 1: Fast HTTP HEAD with full browser request headers.
      * Phase 2: HTTP GET with Range: bytes=0-1 to extract Content-Range: bytes 0-1/TOTAL_BYTES.
@@ -1141,6 +1198,7 @@ class VideoSnifferEngine(
         fullHeaders: Map<String, String>
     ): MediaProbeResult {
         val okHeaders = buildOkHttpHeaders(fullHeaders)
+        var capturedMime: String? = null
 
         // Phase 1: Fast HTTP HEAD
         try {
@@ -1155,6 +1213,7 @@ class VideoSnifferEngine(
             httpClient.newCall(headRequest).execute().use { resp ->
                 val cl = resp.header("Content-Length")?.toLongOrNull() ?: 0L
                 val ct = resp.header("Content-Type")
+                if (!ct.isNullOrBlank()) capturedMime = ct
                 val acceptRanges = resp.header("Accept-Ranges")
                 val isByteRange = acceptRanges?.contains("bytes", ignoreCase = true) == true
 
@@ -1183,6 +1242,7 @@ class VideoSnifferEngine(
 
             httpClient.newCall(rangeRequest).execute().use { resp ->
                 val ct = resp.header("Content-Type")
+                if (!ct.isNullOrBlank()) capturedMime = ct
                 if (resp.code == 206) {
                     val contentRange = resp.header("Content-Range") ?: ""
                     val totalBytes = parseTotalSizeFromContentRange(contentRange)
@@ -1208,7 +1268,11 @@ class VideoSnifferEngine(
             // Range probe failed
         }
 
-        return MediaProbeResult()
+        return MediaProbeResult(
+            sizeBytes = 0L,
+            mimeType = capturedMime,
+            acceptsByteRanges = false
+        )
     }
 
     private fun parseTotalSizeFromContentRange(contentRange: String): Long {
@@ -1676,6 +1740,7 @@ class VideoSnifferEngine(
     }
 
     companion object {
+        private const val TAG = "VideoSnifferEngine"
         const val JS_BRIDGE_NAME = "AndroidVideoSniffer"
 
         const val BLOB_HOOK_SNIFFER_JS = """

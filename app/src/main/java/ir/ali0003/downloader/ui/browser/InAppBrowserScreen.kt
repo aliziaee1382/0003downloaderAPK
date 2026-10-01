@@ -496,7 +496,19 @@ fun InAppBrowserScreen(
                     val currentWeb = webViewInstance ?: viewModel.getWebView()
                     val webUrl = currentWeb?.url ?: currentUrl
                     val webUa = currentWeb?.settings?.userAgentString
-                    val targetUrl = quality?.url ?: item.url
+                    val targetUrl = (quality?.url?.takeIf { it.isNotBlank() } ?: item.url).trim()
+
+                    android.util.Log.e(
+                        "DownloadEnqueuing",
+                        "onConfirmDownload triggered: title='${item.displayTitle}', quality='${quality?.cleanResolutionBadge}', targetUrl='$targetUrl', isM3u8=${quality?.isHlsVariant == true || item.isM3u8}"
+                    )
+
+                    if (targetUrl.isBlank()) {
+                        android.util.Log.e("DownloadEnqueuing", "ABORT: targetUrl is blank!")
+                        android.widget.Toast.makeText(context, "خطا: لینک دانلود نامعتبر است", android.widget.Toast.LENGTH_SHORT).show()
+                        return@MediaSnifferBottomSheet
+                    }
+
                     val freshCookies = try {
                         android.webkit.CookieManager.getInstance().getCookie(targetUrl)
                             ?: (if (webUrl.isNotBlank()) android.webkit.CookieManager.getInstance().getCookie(webUrl) else null)
@@ -524,7 +536,8 @@ fun InAppBrowserScreen(
                         } catch (_: Exception) {}
                     }
 
-                    viewModel.enqueueDownload(item, quality, freshHeaders)
+                    val effectiveQuality = if (quality != null && quality.url.isBlank()) quality.copy(url = targetUrl) else quality
+                    viewModel.enqueueDownload(item, effectiveQuality, freshHeaders)
                     showSnifferSheet = false
                     viewModel.selectMedia(null)
                 }

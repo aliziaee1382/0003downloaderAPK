@@ -881,7 +881,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         freshSessionHeaders: Map<String, String> = emptyMap()
     ) {
         viewModelScope.launch {
-            val downloadUrl = selectedQuality?.url ?: mediaItem.url
+            val downloadUrl = (selectedQuality?.url?.takeIf { it.isNotBlank() } ?: mediaItem.url).trim()
             val urlLower = downloadUrl.lowercase()
             val isM3u8 = urlLower.contains(".m3u8") ||
                     (selectedQuality != null && (selectedQuality.isHlsVariant || selectedQuality.formatTag.contains("HLS", ignoreCase = true))) ||
@@ -984,6 +984,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
 
+            Log.e("DownloadEnqueuing", "Enqueueing task: fileName=$fileName, isM3u8=$isM3u8, totalBytes=$totalBytes, url=$downloadUrl")
+
             downloadRepository.enqueueDownload(
                 url = downloadUrl,
                 websiteUrl = mediaItem.pageUrl,
@@ -1002,6 +1004,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             val dest = if (_saveToVault.value) "Secure Vault" else "Download Queue"
             _downloadToastMessage.value = "Added to $dest: $fileName"
             _selectedMedia.value = null
+
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        getApplication<Application>(),
+                        "شروع دانلود: $fileName",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (_: Exception) {}
         }
     }
 

@@ -2,6 +2,7 @@ package ir.ali0003.downloader.downloader.manager
 
 import android.content.Context
 import android.util.Log
+import android.widget.Toast
 import ir.ali0003.downloader.data.local.AppDatabase
 import ir.ali0003.downloader.data.local.DownloadDao
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
@@ -194,14 +195,36 @@ class DownloadManagerController(
                         activeJobs.remove(task.id)
                     } else if (progress.isFailed) {
                         Log.e(TAG, "Task ${task.id} failed: ${progress.errorMessage}")
-                        downloadDao.markFailed(task.id, progress.errorMessage ?: "Download failed")
+                        val errMsg = progress.errorMessage ?: "Download failed"
+                        downloadDao.markFailed(task.id, errMsg)
                         activeJobs.remove(task.id)
+
+                        try {
+                            CoroutineScope(Dispatchers.Main).launch {
+                                Toast.makeText(
+                                    context,
+                                    "خطای دانلود [${task.fileName}]: $errMsg",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Download error for task ${task.id}: ${e.message}", e)
-                downloadDao.markFailed(task.id, e.message ?: "Download failed")
+                val errMsg = e.message ?: "Download failed"
+                downloadDao.markFailed(task.id, errMsg)
                 activeJobs.remove(task.id)
+
+                try {
+                    CoroutineScope(Dispatchers.Main).launch {
+                        Toast.makeText(
+                            context,
+                            "خطای دانلود [${task.fileName}]: $errMsg",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } catch (_: Exception) {}
             }
         }
 

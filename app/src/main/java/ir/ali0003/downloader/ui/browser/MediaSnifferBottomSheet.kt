@@ -1,5 +1,7 @@
 package ir.ali0003.downloader.ui.browser
 
+import android.util.Log
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -52,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
@@ -134,6 +137,7 @@ private fun DirectQualitySheetContent(
     onDismiss: () -> Unit,
     onConfirmDownload: (SniffedMediaItem, VideoQualityOption?) -> Unit
 ) {
+    val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
 
     val qualityOptions = remember(mediaItem) {
@@ -419,12 +423,32 @@ private fun DirectQualitySheetContent(
                     baseFileSizeBytes = mediaItem?.bestFileSizeBytes ?: 0L,
                     onSelect = {
                         selectedOption = option
+                        val effectiveUrl = option.url.ifBlank { mediaItem.url }
+                        if (effectiveUrl.isBlank()) {
+                            Log.e("MediaSnifferSheet", "Quality ${option.cleanResolutionBadge} clicked but URL is blank! mediaItem.url='${mediaItem.url}'")
+                            Toast.makeText(context, "خطا: لینک دانلود معتبر یافت نشد", Toast.LENGTH_SHORT).show()
+                        } else {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            val targetOption = if (option.url.isBlank()) option.copy(url = effectiveUrl) else option
+                            val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
+                            Log.e("MediaSnifferSheet", "Quality clicked [${targetOption.cleanResolutionBadge}]: starting download for URL=$effectiveUrl")
+                            onConfirmDownload(confirmedItem, targetOption)
+                            onDismiss()
+                        }
                     },
                     onInstantDownload = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
-                        onConfirmDownload(confirmedItem, option)
-                        onDismiss()
+                        val effectiveUrl = option.url.ifBlank { mediaItem.url }
+                        if (effectiveUrl.isBlank()) {
+                            Log.e("MediaSnifferSheet", "Instant download clicked but URL is blank! mediaItem.url='${mediaItem.url}'")
+                            Toast.makeText(context, "خطا: لینک دانلود معتبر یافت نشد", Toast.LENGTH_SHORT).show()
+                        } else {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            val targetOption = if (option.url.isBlank()) option.copy(url = effectiveUrl) else option
+                            val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
+                            Log.e("MediaSnifferSheet", "Instant download clicked [${targetOption.cleanResolutionBadge}]: starting download for URL=$effectiveUrl")
+                            onConfirmDownload(confirmedItem, targetOption)
+                            onDismiss()
+                        }
                     }
                 )
             }
@@ -503,10 +527,19 @@ private fun DirectQualitySheetContent(
                 .clip(RoundedCornerShape(14.dp))
                 .background(GlassTheme.colors.accentGlow)
                 .clickable {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                    val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
-                    onConfirmDownload(confirmedItem, selectedOption)
-                    onDismiss()
+                    val chosen = selectedOption ?: qualityOptions.firstOrNull()
+                    val effectiveUrl = chosen?.url?.ifBlank { mediaItem.url } ?: mediaItem.url
+                    if (effectiveUrl.isBlank()) {
+                        Log.e("MediaSnifferSheet", "Master download clicked but URL is blank! chosen=$chosen, mediaItem.url='${mediaItem.url}'")
+                        Toast.makeText(context, "خطا: لینک دانلود معتبر یافت نشد", Toast.LENGTH_SHORT).show()
+                    } else {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val targetOption = chosen?.let { if (it.url.isBlank()) it.copy(url = effectiveUrl) else it }
+                        val confirmedItem = mediaItem.copy(title = editedTitle.ifBlank { mediaItem.displayTitle })
+                        Log.e("MediaSnifferSheet", "Master download button clicked [${targetOption?.cleanResolutionBadge ?: "Default"}]: starting download for URL=$effectiveUrl")
+                        onConfirmDownload(confirmedItem, targetOption)
+                        onDismiss()
+                    }
                 }
                 .testTag("confirm_download_button"),
             contentAlignment = Alignment.Center
