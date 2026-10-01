@@ -1925,9 +1925,14 @@ fun VideoResolutionPickerBottomSheet(
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Medium
                             )
-                            if (mediaItem.fileSizeBytes > 0) {
+                            val sizeText = when {
+                                mediaItem.fileSizeBytes > 0 -> VideoQualityOption.formatFileSize(mediaItem.fileSizeBytes)
+                                mediaItem.bestFileSizeBytes > 0 -> VideoQualityOption.formatFileSize(mediaItem.bestFileSizeBytes)
+                                else -> ""
+                            }
+                            if (sizeText.isNotBlank()) {
                                 Text(
-                                    text = "• ${VideoQualityOption.formatFileSize(mediaItem.fileSizeBytes)}",
+                                    text = "• $sizeText",
                                     color = GlassTheme.colors.textSecondary,
                                     fontSize = 11.sp
                                 )
@@ -1987,6 +1992,20 @@ fun VideoResolutionPickerBottomSheet(
                                                 text = "(${quality.resolution})",
                                                 color = GlassTheme.colors.textSecondary,
                                                 fontSize = 11.sp
+                                            )
+                                        }
+                                        val qualitySize = calculateOptionDisplaySize(
+                                            option = quality,
+                                            mediaDurationSeconds = mediaItem.durationSeconds,
+                                            allOptions = mediaItem.qualities,
+                                            baseFileSizeBytes = mediaItem.bestFileSizeBytes
+                                        )
+                                        if (qualitySize.isNotBlank()) {
+                                            Text(
+                                                text = "• $qualitySize",
+                                                color = GlassTheme.colors.accentGlow,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Medium
                                             )
                                         }
                                     }

@@ -302,8 +302,21 @@ class AppDownloadService : DownloadService(
             percent.toInt().coerceIn(0, 100)
         }
 
+        val effectiveTotal = when {
+            totalBytes > 0L -> totalBytes
+            percent > 0.5f && bytesDownloaded > 0L -> {
+                (bytesDownloaded.toDouble() / (percent.toDouble() / 100.0)).toLong()
+            }
+            else -> 0L
+        }
+
         val downloadedFormatted = DownloadTaskEntity.formatFileSize(bytesDownloaded)
-        val totalFormatted = if (totalBytes > 0) DownloadTaskEntity.formatFileSize(totalBytes) else "..."
+        val totalFormatted = if (effectiveTotal > 0L) {
+            val sizeStr = DownloadTaskEntity.formatFileSize(effectiveTotal)
+            if (totalBytes > 0L) sizeStr else "~$sizeStr"
+        } else {
+            "..."
+        }
         val speedFormatted = if (speedBps > 0) "${DownloadTaskEntity.formatFileSize(speedBps)}/s" else ""
         val etaFormatted = if (etaSeconds > 0) {
             val mins = etaSeconds / 60

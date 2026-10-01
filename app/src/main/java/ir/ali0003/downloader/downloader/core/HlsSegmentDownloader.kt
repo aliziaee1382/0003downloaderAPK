@@ -67,7 +67,7 @@ class HlsSegmentDownloader(
 
         val targetBitrate = headers["target_bitrate"]?.toLongOrNull() ?: 0L
         val durationSec = headers["duration_seconds"]?.toDoubleOrNull() ?: 0.0
-        val fixedTotalBytes = if (task.totalBytes > 0L) {
+        var fixedTotalBytes = if (task.totalBytes > 0L) {
             task.totalBytes
         } else if (targetBitrate > 0L && durationSec > 0.0) {
             ((targetBitrate * durationSec) / 8.0).toLong()
@@ -80,16 +80,23 @@ class HlsSegmentDownloader(
         var downloadedSegments = 0
 
         try {
-            // 1. Fetch Playlist and resolve target media segments
+            // 1. Fetch Playlist and resolve target media segments with duration and bandwidth
             val playlistContent = fetchText(manifestUrl, headers)
-            val (resolvedPlaylistUrl, segmentUrls) = parseSegments(manifestUrl, playlistContent, headers, task.headersJson)
+            val parsedStream = parseSegments(manifestUrl, playlistContent, headers, task.headersJson)
+            val segmentUrls = parsedStream.segments
+            val streamBandwidth = if (targetBitrate > 0L) targetBitrate else parsedStream.bandwidthBps
+            val streamDuration = if (durationSec > 0.0) durationSec else parsedStream.durationSeconds
+
+            if (fixedTotalBytes <= 0L && streamBandwidth > 0L && streamDuration > 0.0) {
+                fixedTotalBytes = ((streamBandwidth * streamDuration) / 8.0).toLong()
+            }
 
             if (segmentUrls.isEmpty()) {
                 throw IOException("No media segments found in HLS manifest: $manifestUrl")
             }
 
             totalSegments = segmentUrls.size
-            Log.d(TAG, "Task $taskId: parsed $totalSegments media segments from $resolvedPlaylistUrl (fixedTotalBytes: $fixedTotalBytes)")
+            Log.d(TAG, "Task $taskId: parsed $totalSegments media segments from ${parsedStream.variantUrl} (fixedTotalBytes: $fixedTotalBytes, dur: $streamDuration s, bw: $streamBandwidth bps)")
 
             // Ensure destination directory exists
             outputFile.parentFile?.mkdirs()
@@ -142,6 +149,11 @@ class HlsSegmentDownloader(
                     downloadedSegments++
                     totalDownloadedBytes += segmentBytes
 
+                    // Dynamically calibrate estimated total bytes if not known from manifest metadata
+                    if (fixedTotalBytes <= 0L && downloadedSegments > 0) {
+                        fixedTotalBytes = ((totalDownloadedBytes.toDouble() / downloadedSegments.toDouble()) * totalSegments).toLong()
+                    }
+
                     val now = System.currentTimeMillis()
                     val linearProgress = (downloadedSegments.toFloat() / totalSegments.toFloat()).coerceIn(0f, 1f)
 
@@ -163,17 +175,24 @@ class HlsSegmentDownloader(
                     }
 
                     // Emit live updates every 300-500ms and on final segment
-                    // Maintain fixed rock-solid totalBytes: NEVER recalculate dynamically inside download loop
                     if (now - lastEmitTime >= 350L || downloadedSegments == totalSegments) {
                         lastEmitTime = now
                         lastTime = now
                         lastBytes = totalDownloadedBytes
 
+                        val currentTotalToReport = if (fixedTotalBytes > 0L) {
+                            fixedTotalBytes
+                        } else if (downloadedSegments > 0 && totalSegments > 0) {
+                            ((totalDownloadedBytes.toDouble() / downloadedSegments) * totalSegments).toLong()
+                        } else {
+                            0L
+                        }
+
                         emit(
                             DownloadProgress(
                                 taskId = taskId,
                                 downloadedBytes = totalDownloadedBytes,
-                                totalBytes = fixedTotalBytes,
+                                totalBytes = currentTotalToReport,
                                 speedBps = speedBps,
                                 etaSeconds = etaSeconds,
                                 explicitProgress = linearProgress,
@@ -264,12 +283,19 @@ class HlsSegmentDownloader(
         return response.body?.string() ?: throw IOException("Empty playlist body from $url")
     }
 
+    data class ParsedHlsStream(
+        val variantUrl: String,
+        val segments: List<String>,
+        val bandwidthBps: Long,
+        val durationSeconds: Double
+    )
+
     private fun parseSegments(
         baseUrl: String,
         content: String,
         headers: Map<String, String>,
         headersJson: String?
-    ): Pair<String, List<String>> {
+    ): ParsedHlsStream {
         val lines = content.lines().map { it.trim() }
 
         // Check if Master Playlist with sub-variants (#EXT-X-STREAM-INF)
@@ -301,9 +327,11 @@ class HlsSegmentDownloader(
                     val streamUrl = resolveUrl(baseUrl, line)
                     if (targetRes.isNotBlank() && currentRes.contains(targetRes, ignoreCase = true)) {
                         chosenVariantUrl = streamUrl
+                        bestBandwidth = currentBandwidth
                         break
                     } else if (targetBitrate > 0L && currentBandwidth == targetBitrate) {
                         chosenVariantUrl = streamUrl
+                        bestBandwidth = currentBandwidth
                         break
                     } else if (currentBandwidth >= bestBandwidth) {
                         bestBandwidth = currentBandwidth
@@ -317,16 +345,19 @@ class HlsSegmentDownloader(
             val targetVariantUrl = chosenVariantUrl ?: baseUrl
             Log.d(TAG, "Selected HLS variant: $targetVariantUrl (bandwidth: $bestBandwidth)")
             val mediaPlaylistContent = fetchText(targetVariantUrl, headers)
-            return Pair(targetVariantUrl, parseMediaPlaylistSegments(targetVariantUrl, mediaPlaylistContent))
+            val (mediaSegments, dur) = parseMediaPlaylistSegments(targetVariantUrl, mediaPlaylistContent)
+            return ParsedHlsStream(targetVariantUrl, mediaSegments, bestBandwidth, dur)
         }
 
         // Direct media playlist
-        return Pair(baseUrl, parseMediaPlaylistSegments(baseUrl, content))
+        val (mediaSegments, dur) = parseMediaPlaylistSegments(baseUrl, content)
+        return ParsedHlsStream(baseUrl, mediaSegments, 0L, dur)
     }
 
-    private fun parseMediaPlaylistSegments(baseUrl: String, content: String): List<String> {
+    private fun parseMediaPlaylistSegments(baseUrl: String, content: String): Pair<List<String>, Double> {
         val segments = mutableListOf<String>()
         val lines = content.lines().map { it.trim() }
+        var totalDuration = 0.0
 
         // 1. Check for initialization segment (#EXT-X-MAP:URI="init.mp4")
         for (line in lines) {
@@ -340,11 +371,13 @@ class HlsSegmentDownloader(
             }
         }
 
-        // 2. Add all media segments (#EXTINF followed by URL)
+        // 2. Add all media segments (#EXTINF followed by URL) and sum duration
         var isNextSegment = false
         for (line in lines) {
             if (line.startsWith("#EXTINF:")) {
                 isNextSegment = true
+                val durStr = line.removePrefix("#EXTINF:").substringBefore(',').trim()
+                durStr.toDoubleOrNull()?.let { totalDuration += it }
             } else if (isNextSegment && line.isNotEmpty() && !line.startsWith("#")) {
                 segments.add(resolveUrl(baseUrl, line))
                 isNextSegment = false
@@ -360,7 +393,7 @@ class HlsSegmentDownloader(
             }
         }
 
-        return segments
+        return Pair(segments, totalDuration)
     }
 
     private fun downloadSegmentToStream(

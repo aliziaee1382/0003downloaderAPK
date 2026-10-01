@@ -50,9 +50,22 @@ data class DownloadProgress(
             val df = DecimalFormat("#,##0.#")
             val downloadedMB = df.format(downloadedBytes.toDouble() / (1024.0 * 1024.0))
             val percentage = (progressFraction * 100).toInt().coerceIn(0, 100)
-            return if (totalBytes > 0L) {
-                val totalMB = df.format(totalBytes.toDouble() / (1024.0 * 1024.0))
-                "$downloadedMB MB / ~$totalMB MB  •  $percentage%"
+
+            val effectiveTotalBytes = when {
+                totalBytes > 0L && totalBytes > downloadedBytes -> totalBytes
+                totalBytes > 0L && percentage >= 100 -> totalBytes
+                progressFraction > 0.005f && downloadedBytes > 0L -> {
+                    (downloadedBytes.toDouble() / progressFraction.toDouble()).toLong()
+                }
+                totalBytes > 0L -> totalBytes
+                else -> 0L
+            }
+
+            return if (effectiveTotalBytes > 0L) {
+                val totalMB = df.format(effectiveTotalBytes.toDouble() / (1024.0 * 1024.0))
+                val isApprox = (totalBytes <= 0L || totalBytes <= downloadedBytes) && percentage < 100
+                val prefix = if (isApprox) "~" else ""
+                "$downloadedMB MB / $prefix$totalMB MB  •  $percentage%"
             } else {
                 "$downloadedMB MB  •  $percentage%"
             }

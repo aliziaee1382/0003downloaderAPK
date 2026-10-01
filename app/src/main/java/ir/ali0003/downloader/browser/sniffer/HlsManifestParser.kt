@@ -361,7 +361,11 @@ object HlsManifestParser {
 
             val results = mutableListOf<VideoQualityOption>()
             for (variant in declaredVariants) {
-                // Do NOT calculate or display fake deterministic file sizes for HLS
+                val estSize = if (fallbackDurationSeconds > 0.0 && variant.bandwidth > 0L) {
+                    ((variant.bandwidth * fallbackDurationSeconds) / 8.0).toLong()
+                } else {
+                    0L
+                }
                 results.add(
                     VideoQualityOption(
                         label = variant.label,
@@ -369,7 +373,7 @@ object HlsManifestParser {
                         bandwidthBps = variant.bandwidth,
                         url = variant.url,
                         isHlsVariant = true,
-                        estimatedSizeBytes = 0L,
+                        estimatedSizeBytes = estSize,
                         formatTag = "HLS M3U8",
                         isExactSize = false
                     )
@@ -388,14 +392,20 @@ object HlsManifestParser {
                             val groupMatch = """GROUP-ID="([^"]+)"""".toRegex().find(trimmed)
                             val nameMatch = """NAME="([^"]+)"""".toRegex().find(trimmed)
                             val audioName = nameMatch?.groupValues?.get(1) ?: groupMatch?.groupValues?.get(1) ?: "Audio"
+                            val bw = defaultAudioBandwidth ?: 128_000L
+                            val estAudioSize = if (fallbackDurationSeconds > 0.0) {
+                                ((bw * fallbackDurationSeconds) / 8.0).toLong()
+                            } else {
+                                0L
+                            }
                             results.add(
                                 VideoQualityOption(
                                     label = "Audio ($audioName)",
                                     resolution = "Audio",
-                                    bandwidthBps = defaultAudioBandwidth ?: 128_000L,
+                                    bandwidthBps = bw,
                                     url = fullAudioUrl,
                                     isHlsVariant = true,
-                                    estimatedSizeBytes = 0L,
+                                    estimatedSizeBytes = estAudioSize,
                                     formatTag = "AUDIO",
                                     isExactSize = false
                                 )
@@ -415,19 +425,37 @@ object HlsManifestParser {
         // Case B: Direct Media Playlist with #EXTINF segments directly
         if (manifestText.contains("#EXTINF:")) {
             val (detectedRes, detectedLabel) = inferMediaPlaylistResolution(baseUrl, manifestText)
+            val parsedDuration = manifestText.lineSequence()
+                .filter { it.startsWith("#EXTINF:") }
+                .mapNotNull { line ->
+                    line.removePrefix("#EXTINF:").substringBefore(',').trim().toDoubleOrNull()
+                }
+                .sum()
+            val effectiveDuration = if (parsedDuration > 0.0) parsedDuration else fallbackDurationSeconds
+            val estBitrate = when {
+                detectedRes.contains("1080") -> 3_500_000L
+                detectedRes.contains("720") -> 2_000_000L
+                detectedRes.contains("480") -> 1_000_000L
+                else -> 600_000L
+            }
+            val estBytes = if (effectiveDuration > 0.0) {
+                ((estBitrate * effectiveDuration) / 8.0).toLong()
+            } else {
+                0L
+            }
 
             val singleTier = VideoQualityOption(
                 label = detectedLabel,
                 resolution = detectedRes,
-                bandwidthBps = 0L,
+                bandwidthBps = estBitrate,
                 url = baseUrl,
                 isHlsVariant = true,
-                estimatedSizeBytes = 0L,
+                estimatedSizeBytes = estBytes,
                 formatTag = "HLS M3U8",
                 isExactSize = false
             )
 
-            return HlsParseResult(listOf(singleTier), fallbackDurationSeconds)
+            return HlsParseResult(listOf(singleTier), effectiveDuration)
         }
 
         return HlsParseResult(emptyList(), fallbackDurationSeconds)

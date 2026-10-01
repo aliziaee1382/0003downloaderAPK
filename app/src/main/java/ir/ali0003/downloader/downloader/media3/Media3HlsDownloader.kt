@@ -132,8 +132,16 @@ class Media3HlsDownloader(
 
                 val state = download.state
                 val downloadedBytes = download.bytesDownloaded
-                val totalBytes = if (fixedTotalBytes > 0L) fixedTotalBytes else if (download.contentLength > 0L) download.contentLength else 0L
                 val percent = download.percentDownloaded
+                val totalBytes = if (fixedTotalBytes > 0L) {
+                    fixedTotalBytes
+                } else if (download.contentLength > 0L) {
+                    download.contentLength
+                } else if (percent > 0.5f && downloadedBytes > 0L) {
+                    (downloadedBytes.toDouble() / (percent.toDouble() / 100.0)).toLong()
+                } else {
+                    0L
+                }
 
                 val now = System.currentTimeMillis()
                 val timeDelta = (now - lastTime).coerceAtLeast(1)
@@ -263,7 +271,8 @@ class Media3HlsDownloader(
                                 downloadedBytes = downloadedBytes,
                                 totalBytes = totalBytes,
                                 speedBps = speedBps,
-                                etaSeconds = eta
+                                etaSeconds = eta,
+                                explicitProgress = if (percent >= 0f) percent / 100f else null
                             )
                         )
                     }

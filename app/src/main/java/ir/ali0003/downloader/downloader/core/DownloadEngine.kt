@@ -21,7 +21,10 @@ class DownloadEngine(
         task: DownloadTaskEntity,
         outputFile: File
     ): Flow<DownloadProgress> {
-        val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
+        val urlLower = task.url.lowercase()
+        val isHls = task.isM3u8 || urlLower.contains(".m3u8") || task.mimeType.contains("mpegurl", ignoreCase = true)
+
+        android.util.Log.d("DownloadEngine", "Routing task ${task.id} (${task.fileName}): isHls=$isHls (url=${task.url})")
 
         return when {
             isHls -> hlsDownloader.downloadHls(task, outputFile)

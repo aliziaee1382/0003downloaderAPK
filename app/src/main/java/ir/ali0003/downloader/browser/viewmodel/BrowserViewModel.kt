@@ -369,29 +369,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         .thenBy { it.estimatedSizeBytes }
                 )
 
-            if (prioritizeDirectMp4) {
-                if (mp4Candidate != null) {
-                    deduplicatedVideos.add(standardizeOptionLabel(mp4Candidate, height, "MP4"))
-                } else if (hlsCandidate != null) {
-                    deduplicatedVideos.add(standardizeOptionLabel(hlsCandidate, height, "HLS"))
-                } else {
-                    optionsInTier.firstOrNull()?.let {
-                        deduplicatedVideos.add(standardizeOptionLabel(it, height, it.formatTag))
-                    }
-                }
-            } else {
-                if (mp4Candidate != null && hlsCandidate != null) {
-                    deduplicatedVideos.add(standardizeOptionLabel(mp4Candidate, height, "MP4"))
-                    deduplicatedVideos.add(standardizeOptionLabel(hlsCandidate, height, "HLS"))
-                } else if (mp4Candidate != null) {
-                    deduplicatedVideos.add(standardizeOptionLabel(mp4Candidate, height, "MP4"))
-                } else if (hlsCandidate != null) {
-                    deduplicatedVideos.add(standardizeOptionLabel(hlsCandidate, height, "HLS"))
-                } else {
-                    optionsInTier.firstOrNull()?.let {
-                        deduplicatedVideos.add(standardizeOptionLabel(it, height, it.formatTag))
-                    }
-                }
+            // Prioritize the stable segmented HLS stream when available so that downloads are complete and robust
+            val chosen = hlsCandidate ?: mp4Candidate ?: optionsInTier.firstOrNull()
+            if (chosen != null) {
+                val isStreamHls = chosen.isHlsVariant || chosen.formatTag.contains("HLS", ignoreCase = true) || chosen.url.contains(".m3u8", ignoreCase = true)
+                val format = if (isStreamHls) "HLS" else "MP4"
+                deduplicatedVideos.add(standardizeOptionLabel(chosen, height, format))
             }
         }
 
@@ -443,11 +426,13 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             240 -> "426x240"
             else -> option.resolution
         }
-        val cleanFormat = if (format.contains("HLS", ignoreCase = true) || option.isHlsVariant) "HLS" else "MP4"
+        val isStreamHls = format.contains("HLS", ignoreCase = true) || option.isHlsVariant || option.url.contains(".m3u8", ignoreCase = true)
+        val cleanFormat = if (isStreamHls) "HLS" else "MP4"
         return option.copy(
             label = tierBadge,
             resolution = cleanRes,
-            formatTag = cleanFormat
+            formatTag = cleanFormat,
+            isHlsVariant = isStreamHls
         )
     }
 
@@ -462,7 +447,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     ) {
         viewModelScope.launch {
             val downloadUrl = selectedQuality?.url ?: mediaItem.url
-            val isM3u8 = mediaItem.isM3u8 || selectedQuality?.isHlsVariant == true
+            val urlLower = downloadUrl.lowercase()
+            val isM3u8 = urlLower.contains(".m3u8") ||
+                    (selectedQuality != null && (selectedQuality.isHlsVariant || selectedQuality.formatTag.contains("HLS", ignoreCase = true))) ||
+                    (selectedQuality == null && mediaItem.isM3u8)
+
             val isAudio = selectedQuality?.formatTag?.contains("AUDIO", ignoreCase = true) == true ||
                     selectedQuality?.resolution?.contains("Audio", ignoreCase = true) == true
             // Determine totalBytes ONCE before download begins:

@@ -53,7 +53,16 @@ data class DownloadTaskEntity(
         get() = formatFileSize(downloadedBytes)
 
     val formattedTotalSize: String
-        get() = if (totalBytes > 0L) formatFileSize(totalBytes) else "Unknown"
+        get() = if (totalBytes > 0L) {
+            formatFileSize(totalBytes)
+        } else if (status == DownloadStatus.COMPLETED && downloadedBytes > 0L) {
+            formatFileSize(downloadedBytes)
+        } else if (progress > 0.005f && downloadedBytes > 0L) {
+            val est = (downloadedBytes.toDouble() / progress.toDouble()).toLong()
+            if (est > 0L) "~${formatFileSize(est)}" else "Unknown"
+        } else {
+            "Unknown"
+        }
 
     val formattedSpeed: String
         get() = if (status == DownloadStatus.DOWNLOADING && speedBps > 0) {

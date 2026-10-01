@@ -350,11 +350,38 @@ private fun DirectQualitySheetContent(
                             fontSize = 10.sp
                         )
                         Text(
-                            text = if (mediaItem.isM3u8) "HLS Adaptive" else "MP4 Direct",
+                            text = if (mediaItem.mimeType.contains("audio")) "Audio" else "Video",
                             color = GlassTheme.colors.accentGlow,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold
                         )
+                        val headerSize = when {
+                            (selectedOption?.estimatedSizeBytes ?: 0L) > 0L -> {
+                                val s = VideoQualityOption.formatFileSize(selectedOption!!.estimatedSizeBytes)
+                                if (selectedOption!!.isExactSize) s else "~$s"
+                            }
+                            mediaItem.bestFileSizeBytes > 0L -> {
+                                VideoQualityOption.formatFileSize(mediaItem.bestFileSizeBytes)
+                            }
+                            mediaItem.durationSeconds > 0.0 -> {
+                                val est = ((2_000_000L * mediaItem.durationSeconds) / 8.0).toLong()
+                                "~${VideoQualityOption.formatFileSize(est)}"
+                            }
+                            else -> ""
+                        }
+                        if (headerSize.isNotBlank()) {
+                            Text(
+                                text = "•",
+                                color = GlassTheme.colors.textMuted,
+                                fontSize = 10.sp
+                            )
+                            Text(
+                                text = headerSize,
+                                color = GlassTheme.colors.textPrimary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                     }
                 }
             }
@@ -382,6 +409,9 @@ private fun DirectQualitySheetContent(
                 InShotQualityCard(
                     option = option,
                     isSelected = isSelected,
+                    mediaDurationSeconds = mediaItem?.durationSeconds ?: 0.0,
+                    allOptions = qualityOptions,
+                    baseFileSizeBytes = mediaItem?.bestFileSizeBytes ?: 0L,
                     onSelect = {
                         selectedOption = option
                     },
@@ -503,10 +533,109 @@ private fun DirectQualitySheetContent(
 /**
  * Clickable quality card with radio indicator, resolution badge, format, exact size pill, and instant download arrow.
  */
+fun calculateOptionDisplaySize(
+    option: VideoQualityOption,
+    mediaDurationSeconds: Double,
+    allOptions: List<VideoQualityOption> = emptyList(),
+    baseFileSizeBytes: Long = 0L
+): String {
+    // 1. Direct exact or estimated size already on this option
+    if (option.isExactSize && option.estimatedSizeBytes > 0L) {
+        return VideoQualityOption.formatFileSize(option.estimatedSizeBytes)
+    }
+    if (option.estimatedSizeBytes > 0L) {
+        return "~" + VideoQualityOption.formatFileSize(option.estimatedSizeBytes)
+    }
+
+    val isAudio = option.formatTag.contains("AUDIO", ignoreCase = true) ||
+            option.resolution.contains("Audio", ignoreCase = true)
+
+    // 2. If duration is known and bandwidth is known
+    if (mediaDurationSeconds > 0.0 && option.bandwidthBps > 0L) {
+        val est = ((option.bandwidthBps * mediaDurationSeconds) / 8.0).toLong()
+        if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+    }
+
+    // 3. If duration is known and bitrate can be estimated from height
+    if (mediaDurationSeconds > 0.0) {
+        val h = option.getResolutionHeight()
+        val estBitrate = when {
+            h >= 2160 -> 12_000_000L
+            h >= 1440 -> 6_000_000L
+            h >= 1080 -> 3_500_000L
+            h >= 720 -> 2_000_000L
+            h >= 480 -> 1_000_000L
+            h >= 360 -> 600_000L
+            h >= 240 -> 350_000L
+            isAudio -> 128_000L
+            else -> 1_500_000L
+        }
+        val est = ((estBitrate * mediaDurationSeconds) / 8.0).toLong()
+        if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+    }
+
+    // 4. Extrapolate from another option in the same list that HAS a known estimatedSizeBytes
+    val refOpt = allOptions.firstOrNull { it.estimatedSizeBytes > 0L && it.getResolutionHeight() > 0 }
+    val currentHeight = option.getResolutionHeight()
+    if (refOpt != null && currentHeight > 0) {
+        val refHeight = refOpt.getResolutionHeight()
+        val scale = Math.pow(currentHeight.toDouble() / refHeight.toDouble(), 1.25)
+        val extrapolated = (refOpt.estimatedSizeBytes * scale).toLong()
+        if (extrapolated > 0L) {
+            return "~" + VideoQualityOption.formatFileSize(extrapolated)
+        }
+    }
+
+    // 5. Extrapolate from baseFileSizeBytes
+    if (baseFileSizeBytes > 0L) {
+        if (currentHeight > 0) {
+            val scale = when {
+                currentHeight >= 1080 -> 1.0
+                currentHeight >= 720 -> 0.55
+                currentHeight >= 480 -> 0.32
+                currentHeight >= 360 -> 0.20
+                else -> 0.12
+            }
+            val est = (baseFileSizeBytes * scale).toLong()
+            if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+        } else {
+            return "~" + VideoQualityOption.formatFileSize(baseFileSizeBytes)
+        }
+    }
+
+    // 6. Bandwidth with default estimated duration (e.g. 180 seconds / 3 mins)
+    if (option.bandwidthBps > 0L) {
+        val est = ((option.bandwidthBps * 180.0) / 8.0).toLong()
+        if (est > 0L) return "~" + VideoQualityOption.formatFileSize(est)
+    }
+
+    // 7. Standard plausible estimation based on resolution height
+    val defaultEstimate = when {
+        currentHeight >= 2160 -> 120 * 1024 * 1024L
+        currentHeight >= 1440 -> 70 * 1024 * 1024L
+        currentHeight >= 1080 -> 45 * 1024 * 1024L
+        currentHeight >= 720 -> 24 * 1024 * 1024L
+        currentHeight >= 480 -> 14 * 1024 * 1024L
+        currentHeight >= 360 -> 8 * 1024 * 1024L
+        currentHeight >= 240 -> 5 * 1024 * 1024L
+        isAudio -> 3 * 1024 * 1024L
+        else -> 20 * 1024 * 1024L
+    }
+    return "~" + VideoQualityOption.formatFileSize(defaultEstimate)
+}
+
+/**
+ * Clean Single-Tap Quality Card (InShot Inspired):
+ * Displays radio selection indicator, resolution label, subtitle, exact or estimated file size,
+ * and an instant download action circle.
+ */
 @Composable
 private fun InShotQualityCard(
     option: VideoQualityOption,
     isSelected: Boolean,
+    mediaDurationSeconds: Double = 0.0,
+    allOptions: List<VideoQualityOption> = emptyList(),
+    baseFileSizeBytes: Long = 0L,
     onSelect: () -> Unit,
     onInstantDownload: () -> Unit
 ) {
@@ -554,32 +683,7 @@ private fun InShotQualityCard(
                     modifier = Modifier.size(20.dp)
                 )
 
-                // Resolution Badge Pill
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(
-                            if (isAudio) GlassTheme.colors.surfaceGlass
-                            else if (isSelected) GlassTheme.colors.accentGlow.copy(alpha = 0.25f)
-                            else GlassTheme.colors.accentGlow.copy(alpha = 0.14f)
-                        )
-                        .border(
-                            0.8.dp,
-                            if (isAudio) GlassTheme.colors.glassBorder
-                            else GlassTheme.colors.accentGlow.copy(alpha = 0.5f),
-                            RoundedCornerShape(6.dp)
-                        )
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
-                ) {
-                    Text(
-                        text = option.cleanResolutionBadge,
-                        color = if (isAudio) GlassTheme.colors.textPrimary else GlassTheme.colors.accentGlow,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                // Label & Format Subtitle
+                // Label & Format Subtitle (No redundant card next to numbers)
                 Column(
                     modifier = Modifier.weight(1f, fill = false)
                 ) {
@@ -591,44 +695,22 @@ private fun InShotQualityCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        // Format Type Badge (MP4 / HLS)
-                        val isHls = option.isHlsVariant || option.formatTag.contains("HLS", ignoreCase = true)
-                        val formatLabel = if (isAudio) "MP3" else if (isHls) "HLS" else "MP4"
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(
-                                    if (isHls) GlassTheme.colors.surfaceGlass
-                                    else GlassTheme.colors.accentGlow.copy(alpha = 0.16f)
-                                )
-                                .border(
-                                    0.6.dp,
-                                    if (isHls) GlassTheme.colors.glassBorder
-                                    else GlassTheme.colors.accentGlow.copy(alpha = 0.4f),
-                                    RoundedCornerShape(4.dp)
-                                )
-                                .padding(horizontal = 4.dp, vertical = 1.dp)
-                        ) {
-                            Text(
-                                text = formatLabel,
-                                color = if (isHls) GlassTheme.colors.textSecondary else GlassTheme.colors.accentGlow,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        if (option.resolution.isNotBlank() && !isAudio) {
-                            Text(
-                                text = option.resolution,
-                                color = GlassTheme.colors.textMuted,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                    if (option.resolution.isNotBlank() && !isAudio) {
+                        Text(
+                            text = option.resolution,
+                            color = GlassTheme.colors.textMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else if (isAudio) {
+                        Text(
+                            text = "Audio Only",
+                            color = GlassTheme.colors.textMuted,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -640,14 +722,13 @@ private fun InShotQualityCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Exact/Estimated File Size Pill
-                val displaySize = if (option.formattedSize.isNotBlank()) {
-                    option.formattedSize
-                } else if (option.isHlsVariant) {
-                    "Adaptive HLS"
-                } else {
-                    option.formatTag
-                }
+                // Exact/Estimated File Size Pill (Always guarantees an accurate or estimated size)
+                val displaySize = calculateOptionDisplaySize(
+                    option = option,
+                    mediaDurationSeconds = mediaDurationSeconds,
+                    allOptions = allOptions,
+                    baseFileSizeBytes = baseFileSizeBytes
+                )
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
@@ -848,20 +929,32 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
                 !u.contains("googlesyndication") && !u.contains("adnxs")
     }
 
+    // If named resolution tiers exist (1080p, 720p, etc.), remove vague Source Stream / Direct Stream stubs
+    val hasNamedTiers = validVideos.any { it.getResolutionHeight() > 0 }
+    val cleanVideos = if (hasNamedTiers) {
+        validVideos.filterNot {
+            it.label.contains("Source Stream", ignoreCase = true) ||
+                    it.label.contains("Direct Stream", ignoreCase = true) ||
+                    (it.getResolutionHeight() <= 0 && it.resolution.isBlank())
+        }
+    } else {
+        validVideos
+    }
+
     // 3. Group by resolution height (e.g. 2160, 1440, 1080, 720, 480, 360, 240)
-    val groupedByHeight = validVideos.groupBy { it.getResolutionHeight() }
+    val groupedByHeight = cleanVideos.groupBy { it.getResolutionHeight() }
     val deduplicatedVideos = mutableListOf<VideoQualityOption>()
 
     for ((height, optionsInHeight) in groupedByHeight) {
-        val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) }
-            .maxWithOrNull(
-                compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                    .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
-            )
-        val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) }
+        val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) || it.url.contains(".m3u8", ignoreCase = true) }
             .maxWithOrNull(
                 compareBy<VideoQualityOption> { it.bandwidthBps }
                     .thenBy { it.estimatedSizeBytes }
+            )
+        val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) && !it.url.contains(".m3u8", ignoreCase = true) }
+            .maxWithOrNull(
+                compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                    .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
             )
 
         val tierBadge = when (height) {
@@ -875,14 +968,11 @@ private fun deduplicateAndSortOptionsForSheet(list: List<VideoQualityOption>): L
             else -> if (height > 0) "${height}p" else ""
         }
 
-        if (mp4Candidate != null) {
-            val label = if (tierBadge.isNotBlank()) tierBadge else mp4Candidate.label
-            deduplicatedVideos.add(mp4Candidate.copy(label = label, formatTag = "MP4"))
-        } else if (hlsCandidate != null) {
-            val label = if (tierBadge.isNotBlank()) tierBadge else hlsCandidate.label
-            deduplicatedVideos.add(hlsCandidate.copy(label = label, formatTag = "HLS"))
-        } else {
-            optionsInHeight.firstOrNull()?.let { deduplicatedVideos.add(it) }
+        val chosen = hlsCandidate ?: mp4Candidate ?: optionsInHeight.firstOrNull()
+        if (chosen != null) {
+            val label = if (tierBadge.isNotBlank()) tierBadge else chosen.label
+            val isHls = chosen.isHlsVariant || chosen.formatTag.contains("HLS", ignoreCase = true) || chosen.url.contains(".m3u8", ignoreCase = true)
+            deduplicatedVideos.add(chosen.copy(label = label, formatTag = if (isHls) "HLS" else "MP4", isHlsVariant = isHls))
         }
     }
 

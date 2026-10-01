@@ -2,6 +2,7 @@ package ir.ali0003.downloader.downloader.core
 
 import android.content.Context
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.util.Log
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.data.settings.DownloadSettingsPreferences
@@ -19,14 +20,18 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
-import java.io.RandomAccessFile
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * High-performance Multi-Threaded Chunk Downloader with HTTP Range slicing.
- * Splits large payload into 4-8 parallel OkHttp Range streams, writes to indexed scratch files,
- * and stitch-muxes safely into the destination file without RAM memory spikes.
+ * Resilient Direct Progressive & Multi-Threaded Chunk Downloader.
+ * Features:
+ * 1. Preserves full browser context headers (Cookies from CookieManager, Referer from websiteUrl, Origin, User-Agent)
+ *    to prevent CDN 403 Forbidden / anti-hotlink blocks.
+ * 2. Probes server with non-destructive Range GET requests.
+ * 3. Graceful multi-chunk to single-stream fallback: if concurrent Range requests are rejected, throttled,
+ *    or fail at runtime, automatically falls back to a clean continuous single-stream GET download.
+ * 4. Writes streams directly to disk with proper buffer flushing and MediaScanner indexing on completion.
  */
 class ChunkDownloader(
     private val context: Context,
@@ -36,7 +41,8 @@ class ChunkDownloader(
     companion object {
         private const val TAG = "ChunkDownloader"
         private const val BUFFER_SIZE = 64 * 1024 // 64KB stream buffer
-        private const val NUM_THREADS = 4
+        private const val DEFAULT_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 
         private fun defaultClient(): OkHttpClient {
             return OkHttpClient.Builder()
@@ -44,17 +50,24 @@ class ChunkDownloader(
                 .readTimeout(60, TimeUnit.SECONDS)
                 .followRedirects(true)
                 .followSslRedirects(true)
+                .retryOnConnectionFailure(true)
                 .build()
         }
 
-        fun parseHeaders(headersJson: String?, url: String? = null): Map<String, String> {
+        fun parseHeaders(
+            headersJson: String?,
+            url: String? = null,
+            websiteUrl: String? = null
+        ): Map<String, String> {
             val map = mutableMapOf<String, String>()
+
+            // 1. Parse custom headers from JSON
             if (!headersJson.isNullOrBlank()) {
                 try {
                     val json = JSONObject(headersJson)
                     json.keys().forEach { key ->
                         val v = json.optString(key)
-                        if (key.isNotBlank() && v.isNotBlank()) {
+                        if (key.isNotBlank() && v.isNotBlank() && !key.startsWith("target_") && !key.startsWith("media3_")) {
                             map[key] = v
                         }
                     }
@@ -63,38 +76,78 @@ class ChunkDownloader(
                 }
             }
 
-            if (!url.isNullOrBlank()) {
+            val effectiveWebpage = when {
+                !websiteUrl.isNullOrBlank() -> websiteUrl
+                map.containsKey("webpageUrl") -> map["webpageUrl"]
+                map.containsKey("Referer") -> map["Referer"]
+                map.containsKey("referer") -> map["referer"]
+                else -> null
+            }
+
+            // 2. Fresh session cookies from CookieManager for website URL and media URL
+            if (!map.containsKey("Cookie") && !map.containsKey("cookie")) {
                 try {
-                    if (!map.containsKey("Cookie") && !map.containsKey("cookie")) {
-                        val cookie = android.webkit.CookieManager.getInstance().getCookie(url)
-                        if (!cookie.isNullOrBlank()) {
-                            map["Cookie"] = cookie
-                        }
-                    }
-                } catch (_: Exception) {}
-                try {
-                    if (!map.containsKey("Referer") && !map.containsKey("referer")) {
-                        val uri = android.net.Uri.parse(url)
-                        if (uri.scheme != null && uri.host != null) {
-                            map["Referer"] = "${uri.scheme}://${uri.host}/"
-                        }
+                    val cookie = if (!effectiveWebpage.isNullOrBlank()) {
+                        android.webkit.CookieManager.getInstance().getCookie(effectiveWebpage)
+                    } else if (!url.isNullOrBlank()) {
+                        android.webkit.CookieManager.getInstance().getCookie(url)
+                    } else null
+
+                    val fallbackCookie = if (!url.isNullOrBlank() && cookie.isNullOrBlank()) {
+                        android.webkit.CookieManager.getInstance().getCookie(url)
+                    } else null
+
+                    val chosenCookie = cookie ?: fallbackCookie
+                    if (!chosenCookie.isNullOrBlank()) {
+                        map["Cookie"] = chosenCookie
                     }
                 } catch (_: Exception) {}
             }
 
-            if (!map.containsKey("User-Agent") && !map.containsKey("user-agent")) {
-                map["User-Agent"] = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+            // 3. Referer & Origin from websiteUrl (eliminates CDN anti-hotlinking 403 Forbidden)
+            if (!map.containsKey("Referer") && !map.containsKey("referer")) {
+                if (!effectiveWebpage.isNullOrBlank()) {
+                    map["Referer"] = effectiveWebpage
+                } else if (!url.isNullOrBlank()) {
+                    try {
+                        val uri = Uri.parse(url)
+                        if (uri.scheme != null && uri.host != null) {
+                            map["Referer"] = "${uri.scheme}://${uri.host}/"
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+
+            if (!map.containsKey("Origin") && !map.containsKey("origin")) {
+                val ref = map["Referer"] ?: map["referer"] ?: effectiveWebpage ?: url
+                if (!ref.isNullOrBlank()) {
+                    try {
+                        val uri = Uri.parse(ref)
+                        if (uri.scheme != null && uri.host != null) {
+                            map["Origin"] = "${uri.scheme}://${uri.host}"
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+
+            // 4. Modern User-Agent
+            val ua = map["User-Agent"] ?: map["user-agent"]
+            if (ua.isNullOrBlank() || ua.contains("VideoVault", ignoreCase = true)) {
+                map["User-Agent"] = DEFAULT_USER_AGENT
             }
 
             return map
         }
     }
 
-    fun parseHeaders(headersJson: String?, url: String? = null): Map<String, String> =
-        parseHeaders(headersJson, url)
+    fun parseHeaders(
+        headersJson: String?,
+        url: String? = null,
+        websiteUrl: String? = null
+    ): Map<String, String> = Companion.parseHeaders(headersJson, url, websiteUrl)
 
     /**
-     * Executes multi-chunk or single-stream download, emitting real-time DownloadProgress.
+     * Executes resilient progressive download (multi-chunk with automatic single-stream fallback).
      */
     fun download(
         task: DownloadTaskEntity,
@@ -102,33 +155,35 @@ class ChunkDownloader(
     ): Flow<DownloadProgress> = flow {
         val taskId = task.id
         val url = task.url
-        val headers = parseHeaders(task.headersJson, url)
+        val websiteUrl = task.websiteUrl
+        val headers = Companion.parseHeaders(task.headersJson, url, websiteUrl)
 
-        // 1. Head or Range probe to determine content length & Accept-Ranges support
-        val probe = probeServer(url, headers)
-        val contentLength = probe.contentLength
+        Log.d(TAG, "Starting download for task $taskId: $url (dest: ${outputFile.name}, website: $websiteUrl)")
+
+        // 1. Range/Head probe to determine content length & Accept-Ranges support
+        val probe = probeServer(url, headers, websiteUrl)
+        val contentLength = if (probe.contentLength > 0L) probe.contentLength else task.totalBytes
         val supportsRange = probe.acceptsRanges && contentLength > 1024 * 1024 // Only range-slice files > 1MB
 
         Log.d(TAG, "Task $taskId: length=$contentLength bytes, supportsRange=$supportsRange")
 
         // Scratch temp directory for parallel chunks
         val scratchDir = File(context.cacheDir, "chunks_$taskId")
-        if (!scratchDir.exists()) scratchDir.mkdirs()
-
         val totalDownloadedAtomic = AtomicLong(0L)
         var lastTime = System.currentTimeMillis()
         var lastBytes = 0L
 
-        try {
-            val settings = DownloadSettingsPreferences.getInstance(context)
+        var multiChunkSucceeded = false
+
+        val settings = DownloadSettingsPreferences.getInstance(context)
         val numThreads = settings.getEffectiveThreadCount().coerceIn(1, 16)
 
-        if (supportsRange && contentLength > 0 && numThreads > 1) {
-            // Multi-threaded chunk range download
-            val chunkSize = contentLength / numThreads
-            val chunkFiles = mutableListOf<File>()
-
+        if (supportsRange && contentLength > 1024 * 1024 && numThreads > 1) {
             try {
+                if (!scratchDir.exists()) scratchDir.mkdirs()
+                val chunkSize = contentLength / numThreads
+                val chunkFiles = mutableListOf<File>()
+
                 coroutineScope {
                     val deferredList = (0 until numThreads).map { index ->
                         val startByte = index * chunkSize
@@ -140,6 +195,7 @@ class ChunkDownloader(
                             downloadRangeChunk(
                                 url = url,
                                 headers = headers,
+                                websiteUrl = websiteUrl,
                                 startByte = startByte,
                                 endByte = endByte,
                                 outputFile = chunkFile,
@@ -175,16 +231,16 @@ class ChunkDownloader(
 
                         lastTime = now
                         lastBytes = currentBytes
-                        kotlinx.coroutines.delay(400)
+                        kotlinx.coroutines.delay(350)
                     }
 
-                    // Wait for all workers to finish
                     deferredList.awaitAll()
                 }
 
                 // Sequential stitch into final outputFile
                 Log.d(TAG, "Stitching ${chunkFiles.size} chunks into ${outputFile.name}")
                 stitchChunks(chunkFiles, outputFile)
+                multiChunkSucceeded = true
 
                 if (!task.isHidden && outputFile.exists()) {
                     try {
@@ -198,12 +254,13 @@ class ChunkDownloader(
                     } catch (_: Exception) {}
                 }
 
-                // Emit 100% completion
+                val finalSize = if (outputFile.exists() && outputFile.length() > 0L) outputFile.length() else contentLength
+
                 emit(
                     DownloadProgress(
                         taskId = taskId,
-                        downloadedBytes = contentLength,
-                        totalBytes = contentLength,
+                        downloadedBytes = finalSize,
+                        totalBytes = finalSize,
                         speedBps = 0L,
                         etaSeconds = 0L,
                         isCompleted = true,
@@ -211,131 +268,129 @@ class ChunkDownloader(
                     )
                 )
 
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "Multi-chunk download failed for task $taskId (${e.message}), gracefully falling back to single-stream GET", e)
+                multiChunkSucceeded = false
+                if (outputFile.exists()) outputFile.delete()
             } finally {
-                // Cleanup temp scratch files
                 scratchDir.deleteRecursively()
             }
-
-        } else {
-            // Single stream fallback (e.g. server doesn't support Range slicing or length is unknown)
-            downloadSingleStream(
-                url = url,
-                headers = headers,
-                outputFile = outputFile,
-                totalBytesEstimated = if (contentLength > 0) contentLength else task.totalBytes,
-                onProgress = { progress ->
-                    if (progress.isCompleted && !task.isHidden && outputFile.exists()) {
-                        try {
-                            MediaScannerConnection.scanFile(
-                                context,
-                                arrayOf(outputFile.absolutePath),
-                                arrayOf(task.mimeType.ifBlank { "video/mp4" })
-                            ) { path, uri ->
-                                Log.d(TAG, "MediaScanner indexed single stream downloaded file: $path -> $uri")
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    emit(progress.copy(taskId = taskId))
-                }
-            )
         }
-    } catch (e: Exception) {
-        if (e is CancellationException) throw e
-        Log.e(TAG, "Task $taskId failed in ChunkDownloader: ${e.message}", e)
-        emit(
-            DownloadProgress(
-                taskId = taskId,
-                downloadedBytes = totalDownloadedAtomic.get(),
-                totalBytes = task.totalBytes,
-                speedBps = 0L,
-                etaSeconds = 0L,
-                isFailed = true,
-                errorMessage = e.message ?: "Download failed"
-            )
-        )
-    }
-}.flowOn(Dispatchers.IO)
+
+        // If multi-chunk was not supported OR failed at runtime, execute continuous single-stream download
+        if (!multiChunkSucceeded) {
+            try {
+                Log.d(TAG, "Executing single-stream download for task $taskId (${task.fileName})")
+                downloadSingleStream(
+                    url = url,
+                    headers = headers,
+                    websiteUrl = websiteUrl,
+                    outputFile = outputFile,
+                    totalBytesEstimated = contentLength,
+                    onProgress = { progress ->
+                        if (progress.isCompleted && !task.isHidden && outputFile.exists()) {
+                            try {
+                                MediaScannerConnection.scanFile(
+                                    context,
+                                    arrayOf(outputFile.absolutePath),
+                                    arrayOf(task.mimeType.ifBlank { "video/mp4" })
+                                ) { path, uri ->
+                                    Log.d(TAG, "MediaScanner indexed single-stream downloaded file: $path -> $uri")
+                                }
+                            } catch (_: Exception) {}
+                        }
+                        emit(progress.copy(taskId = taskId))
+                    }
+                )
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.e(TAG, "Single-stream download failed for task $taskId: ${e.message}", e)
+                emit(
+                    DownloadProgress(
+                        taskId = taskId,
+                        downloadedBytes = outputFile.takeIf { it.exists() }?.length() ?: 0L,
+                        totalBytes = task.totalBytes,
+                        speedBps = 0L,
+                        etaSeconds = 0L,
+                        isFailed = true,
+                        errorMessage = e.message ?: "Download failed"
+                    )
+                )
+            }
+        }
+    }.flowOn(Dispatchers.IO)
 
     private fun applyBrowserContextHeaders(
         builder: Request.Builder,
         headers: Map<String, String>,
-        targetUrl: String
+        targetUrl: String,
+        websiteUrl: String? = null
     ) {
-        var hasUserAgent = false
-        var hasReferer = false
-        var hasCookie = false
+        val mergedHeaders = Companion.parseHeaders(null, targetUrl, websiteUrl).toMutableMap()
+        mergedHeaders.putAll(headers)
 
-        headers.forEach { (k, v) ->
-            if (k.isNotBlank() && v.isNotBlank()) {
+        mergedHeaders.forEach { (k, v) ->
+            if (k.isNotBlank() && v.isNotBlank() && !k.startsWith("target_") && !k.startsWith("media3_")) {
                 try {
                     builder.header(k, v)
-                    if (k.equals("User-Agent", ignoreCase = true)) hasUserAgent = true
-                    if (k.equals("Referer", ignoreCase = true)) hasReferer = true
-                    if (k.equals("Cookie", ignoreCase = true)) hasCookie = true
                 } catch (_: Exception) {}
             }
         }
-
-        if (!hasUserAgent) {
-            builder.header(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-            )
-        }
-
-        if (!hasCookie && targetUrl.isNotBlank()) {
-            try {
-                val cookie = android.webkit.CookieManager.getInstance().getCookie(targetUrl)
-                if (!cookie.isNullOrBlank()) {
-                    builder.header("Cookie", cookie)
-                }
-            } catch (_: Exception) {}
-        }
-
-        if (!hasReferer && targetUrl.isNotBlank()) {
-            try {
-                val uri = android.net.Uri.parse(targetUrl)
-                if (uri.scheme != null && uri.host != null) {
-                    builder.header("Referer", "${uri.scheme}://${uri.host}/")
-                }
-            } catch (_: Exception) {}
-        }
     }
 
-    private fun probeServer(url: String, headers: Map<String, String>): ServerProbeResult {
-        try {
-            val requestBuilder = Request.Builder().url(url).head()
-            applyBrowserContextHeaders(requestBuilder, headers, url)
-            val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            if (response.isSuccessful) {
-                val contentLength = response.header("Content-Length")?.toLongOrNull() ?: -1L
-                val acceptRanges = response.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
-                return ServerProbeResult(contentLength, acceptRanges)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Head probe failed: ${e.message}, falling back to GET probe")
-        }
-
-        // Try small Range GET probe
+    private fun probeServer(
+        url: String,
+        headers: Map<String, String>,
+        websiteUrl: String? = null
+    ): ServerProbeResult {
+        // Try Range GET probe first with a tiny 1KB chunk:
+        // Range GET is far more reliable on CDNs than HEAD (which is often blocked with 403 or 405)
         try {
             val requestBuilder = Request.Builder()
                 .url(url)
                 .addHeader("Range", "bytes=0-1023")
-            applyBrowserContextHeaders(requestBuilder, headers, url)
+            applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
             val response = okHttpClient.newCall(requestBuilder.build()).execute()
-            val isPartial = response.code == 206
-            val contentRange = response.header("Content-Range")
-            val total = contentRange?.substringAfterLast("/")?.toLongOrNull() ?: -1L
-            return ServerProbeResult(total, isPartial)
+            response.use { res ->
+                if (res.code == 206) {
+                    val contentRange = res.header("Content-Range")
+                    val total = contentRange?.substringAfterLast("/")?.trim()?.toLongOrNull() ?: -1L
+                    val acceptRanges = res.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) != false
+                    return ServerProbeResult(total, true)
+                } else if (res.isSuccessful) {
+                    // Server returned 200 OK (ignored Range header -> does NOT support partial content)
+                    val contentLength = res.header("Content-Length")?.toLongOrNull() ?: -1L
+                    return ServerProbeResult(contentLength, false)
+                }
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Range probe failed: ${e.message}")
-            return ServerProbeResult(-1L, false)
+            Log.w(TAG, "Range GET probe failed: ${e.message}, trying HEAD probe", e)
         }
+
+        // Fallback: HEAD probe
+        try {
+            val requestBuilder = Request.Builder().url(url).head()
+            applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
+            val response = okHttpClient.newCall(requestBuilder.build()).execute()
+            response.use { res ->
+                if (res.isSuccessful) {
+                    val contentLength = res.header("Content-Length")?.toLongOrNull() ?: -1L
+                    val acceptRanges = res.header("Accept-Ranges")?.contains("bytes", ignoreCase = true) == true
+                    return ServerProbeResult(contentLength, acceptRanges)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Head probe failed: ${e.message}")
+        }
+
+        return ServerProbeResult(-1L, false)
     }
 
     private fun downloadRangeChunk(
         url: String,
         headers: Map<String, String>,
+        websiteUrl: String?,
         startByte: Long,
         endByte: Long,
         outputFile: File,
@@ -345,10 +400,10 @@ class ChunkDownloader(
             .url(url)
             .addHeader("Range", "bytes=$startByte-$endByte")
 
-        applyBrowserContextHeaders(requestBuilder, headers, url)
+        applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
 
         val response = okHttpClient.newCall(requestBuilder.build()).execute()
-        if (!response.isSuccessful && response.code != 206) {
+        if (!response.isSuccessful || response.code != 206) {
             throw java.io.IOException("HTTP error ${response.code} downloading chunk range $startByte-$endByte")
         }
 
@@ -369,20 +424,32 @@ class ChunkDownloader(
     private suspend fun downloadSingleStream(
         url: String,
         headers: Map<String, String>,
+        websiteUrl: String?,
         outputFile: File,
         totalBytesEstimated: Long,
         onProgress: suspend (DownloadProgress) -> Unit
     ) {
-        val requestBuilder = Request.Builder().url(url).get()
-        applyBrowserContextHeaders(requestBuilder, headers, url)
-
-        val response = okHttpClient.newCall(requestBuilder.build()).execute()
-        if (!response.isSuccessful) {
-            throw java.io.IOException("HTTP error ${response.code} downloading stream")
+        outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) {
+            outputFile.delete()
         }
 
-        val body = response.body ?: throw java.io.IOException("Empty response body")
-        val realLength = if (totalBytesEstimated > 0) totalBytesEstimated else (body.contentLength().takeIf { it > 0 } ?: 0L)
+        val requestBuilder = Request.Builder().url(url).get()
+        applyBrowserContextHeaders(requestBuilder, headers, url, websiteUrl)
+
+        val call = okHttpClient.newCall(requestBuilder.build())
+        val response = call.execute()
+        if (!response.isSuccessful) {
+            throw java.io.IOException("HTTP error ${response.code} downloading stream from $url")
+        }
+
+        val body = response.body ?: throw java.io.IOException("Empty response body from $url")
+        val remoteLength = body.contentLength()
+        val realLength = when {
+            remoteLength > 0L -> remoteLength
+            totalBytesEstimated > 0L -> totalBytesEstimated
+            else -> 0L
+        }
 
         var totalBytesRead = 0L
         var lastTime = System.currentTimeMillis()
@@ -397,11 +464,11 @@ class ChunkDownloader(
                     totalBytesRead += read
 
                     val now = System.currentTimeMillis()
-                    if (now - lastTime >= 400) {
+                    if (now - lastTime >= 350L) {
                         val elapsed = (now - lastTime).coerceAtLeast(1L)
                         val speedBps = ((totalBytesRead - lastBytes) * 1000L) / elapsed
                         val remaining = (realLength - totalBytesRead).coerceAtLeast(0L)
-                        val eta = if (speedBps > 0 && realLength > 0) remaining / speedBps else 0L
+                        val eta = if (speedBps > 0L && realLength > 0L) remaining / speedBps else 0L
 
                         onProgress(
                             DownloadProgress(
@@ -420,14 +487,17 @@ class ChunkDownloader(
             }
         }
 
+        val finalLength = if (outputFile.exists() && outputFile.length() > 0L) outputFile.length() else totalBytesRead
+
         onProgress(
             DownloadProgress(
                 taskId = 0L,
-                downloadedBytes = totalBytesRead,
-                totalBytes = if (realLength > 0) realLength else totalBytesRead,
+                downloadedBytes = finalLength,
+                totalBytes = finalLength,
                 speedBps = 0L,
                 etaSeconds = 0L,
-                isCompleted = true
+                isCompleted = true,
+                explicitProgress = 1.0f
             )
         )
     }
@@ -449,43 +519,6 @@ class ChunkDownloader(
             }
             destOut.flush()
         }
-    }
-
-    /**
-     * Downloads an arbitrary direct stream to [outputFile] with byte-by-byte reporting.
-     * Can be invoked concurrently for separated DASH video and audio payload downloads.
-     */
-    fun downloadUrlToFile(
-        url: String,
-        headers: Map<String, String>,
-        outputFile: File,
-        onBytesRead: (Long) -> Unit
-    ): Long {
-        val requestBuilder = Request.Builder().url(url).get()
-        applyBrowserContextHeaders(requestBuilder, headers, url)
-
-        val response = okHttpClient.newCall(requestBuilder.build()).execute()
-        if (!response.isSuccessful) {
-            throw java.io.IOException("HTTP error ${response.code} downloading $url")
-        }
-
-        val body = response.body ?: throw java.io.IOException("Empty response body from $url")
-        var totalRead = 0L
-
-        outputFile.parentFile?.mkdirs()
-        outputFile.outputStream().use { fos ->
-            body.byteStream().use { inputStream ->
-                val buffer = ByteArray(BUFFER_SIZE)
-                var read: Int
-                while (inputStream.read(buffer).also { read = it } != -1) {
-                    fos.write(buffer, 0, read)
-                    totalRead += read
-                    onBytesRead(read.toLong())
-                }
-                fos.flush()
-            }
-        }
-        return totalRead
     }
 
     private data class ServerProbeResult(

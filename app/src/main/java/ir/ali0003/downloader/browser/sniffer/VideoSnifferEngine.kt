@@ -211,17 +211,23 @@ class VideoSnifferEngine(
 
         @JavascriptInterface
         fun processMediaDefinitions(json: String?) {
+            processMediaDefinitionsWithDuration(json, 0.0, null)
+        }
+
+        @JavascriptInterface
+        fun processMediaDefinitionsWithDuration(json: String?, duration: Double, title: String?) {
             if (json.isNullOrBlank()) return
             mainHandler.post {
                 try {
                     val pageUrl = webView.url ?: currentPageUrl.get()
-                    val currentTitle = webView.title ?: currentPageTitle.get()
+                    val currentTitle = if (!title.isNullOrBlank()) title else webView.title ?: currentPageTitle.get()
                     val userAgent = try { webView.settings.userAgentString } catch (_: Exception) { "" }
                     parseAndProcessMediaDefinitions(
                         json = json,
                         pageUrl = pageUrl,
                         pageTitle = currentTitle,
-                        userAgent = userAgent
+                        userAgent = userAgent,
+                        externalDuration = duration
                     )
                 } catch (e: Exception) {
                     android.util.Log.e("VideoSnifferEngine", "Error handling processMediaDefinitions: ${e.message}", e)
@@ -243,7 +249,8 @@ class VideoSnifferEngine(
         json: String,
         pageUrl: String,
         pageTitle: String,
-        userAgent: String
+        userAgent: String,
+        externalDuration: Double = 0.0
     ) {
         if (json.isBlank()) return
         try {
@@ -357,6 +364,12 @@ class VideoSnifferEngine(
                         else -> obj.optLong("bitrate", obj.optLong("bandwidth", 0L))
                     }
                     val formatTag = if (isHls) "HLS" else if (format.contains("webm", ignoreCase = true)) "WEBM" else "MP4"
+                    val targetDuration = maxOf(canonicalVideoItem?.durationSeconds ?: 0.0, externalDuration)
+                    val estBytes = if (targetDuration > 0.0 && bandwidthBps > 0L) {
+                        ((bandwidthBps * targetDuration) / 8.0).toLong()
+                    } else {
+                        0L
+                    }
 
                     extractedQualities.add(
                         VideoQualityOption(
@@ -365,7 +378,7 @@ class VideoSnifferEngine(
                             bandwidthBps = bandwidthBps,
                             url = videoUrl,
                             isHlsVariant = isHls,
-                            estimatedSizeBytes = 0L,
+                            estimatedSizeBytes = estBytes,
                             formatTag = formatTag
                         )
                     )
@@ -394,7 +407,7 @@ class VideoSnifferEngine(
                 val previous = canonicalVideoItem
                 val bestTitle = pickBestTitle(previous?.title, pageTitle, targetUrl)
                 val bestPoster = previous?.thumbnailUrl
-                val bestDuration = previous?.durationSeconds ?: 0.0
+                val bestDuration = maxOf(previous?.durationSeconds ?: 0.0, externalDuration)
                 val bestBaseSize = previous?.fileSizeBytes ?: 0L
 
                 val standardizedQualities = normalizeAndBucketQualities(
@@ -1077,18 +1090,19 @@ class VideoSnifferEngine(
         val hasNamedVideoOptions = postClipFilter.any {
             !it.formatTag.contains("AUDIO", ignoreCase = true) &&
                     it.resolution.isNotBlank() &&
-                    !it.label.contains("Direct Stream", ignoreCase = true)
+                    !it.label.contains("Direct Stream", ignoreCase = true) &&
+                    !it.label.contains("Source Stream", ignoreCase = true)
         }
 
         val cleanStreamList = postClipFilter.filterNot { opt ->
             val isAudio = opt.formatTag.contains("AUDIO", ignoreCase = true) || opt.resolution.contains("Audio", ignoreCase = true)
             if (isAudio) return@filterNot false
 
-            if (hasProgressiveMp4 && opt.isHlsVariant && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.resolution.isBlank())) {
+            if (hasProgressiveMp4 && opt.isHlsVariant && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.label.contains("Source Stream", ignoreCase = true) || opt.resolution.isBlank())) {
                 return@filterNot true
             }
 
-            if (hasNamedVideoOptions && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.resolution.isBlank() || opt.label.equals("Variant Stream", ignoreCase = true))) {
+            if (hasNamedVideoOptions && (opt.label.contains("Direct Stream", ignoreCase = true) || opt.label.contains("Source Stream", ignoreCase = true) || opt.resolution.isBlank() || opt.label.equals("Variant Stream", ignoreCase = true))) {
                 return@filterNot true
             }
 
@@ -1105,29 +1119,45 @@ class VideoSnifferEngine(
 
         // 5. Video Tiers Grouping & Deduplication:
         // Group by distinct resolution height.
-        // For each resolution tier: prioritize direct Progressive MP4 for faster and lighter downloading;
-        // fallback to the highest-bandwidth HLS stream for that tier.
+        // For each resolution tier: prioritize the reliable multi-segment HLS stream when available.
         val deduplicatedVideoTiers = mutableListOf<VideoQualityOption>()
         val groupedByHeight = videoOptions.groupBy { it.getResolutionHeight() }
 
         for ((height, optionsInHeight) in groupedByHeight) {
-            val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) }
-                .maxWithOrNull(
-                    compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
-                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
-                )
-            val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) }
+            val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) || it.url.contains(".m3u8", ignoreCase = true) }
                 .maxWithOrNull(
                     compareBy<VideoQualityOption> { it.bandwidthBps }
                         .thenBy { it.estimatedSizeBytes }
                 )
+            val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) && !it.url.contains(".m3u8", ignoreCase = true) }
+                .maxWithOrNull(
+                    compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
+                        .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
+                )
 
-            if (mp4Candidate != null) {
-                deduplicatedVideoTiers.add(mp4Candidate)
-            } else if (hlsCandidate != null) {
-                deduplicatedVideoTiers.add(hlsCandidate)
-            } else {
-                optionsInHeight.firstOrNull()?.let { deduplicatedVideoTiers.add(it) }
+            val chosen = when {
+                hlsCandidate != null -> {
+                    if (hlsCandidate.estimatedSizeBytes <= 0L) {
+                        val est = if (durationSeconds > 0.0 && hlsCandidate.bandwidthBps > 0L) {
+                            ((hlsCandidate.bandwidthBps * durationSeconds) / 8.0).toLong()
+                        } else if (mp4Candidate?.estimatedSizeBytes ?: 0L > 0L) {
+                            mp4Candidate!!.estimatedSizeBytes
+                        } else 0L
+                        if (est > 0L) hlsCandidate.copy(estimatedSizeBytes = est) else hlsCandidate
+                    } else hlsCandidate
+                }
+                mp4Candidate != null -> {
+                    if (mp4Candidate.estimatedSizeBytes <= 0L) {
+                        val est = if (durationSeconds > 0.0 && mp4Candidate.bandwidthBps > 0L) {
+                            ((mp4Candidate.bandwidthBps * durationSeconds) / 8.0).toLong()
+                        } else 0L
+                        if (est > 0L) mp4Candidate.copy(estimatedSizeBytes = est) else mp4Candidate
+                    } else mp4Candidate
+                }
+                else -> optionsInHeight.firstOrNull()
+            }
+            if (chosen != null) {
+                deduplicatedVideoTiers.add(chosen)
             }
         }
 
@@ -1395,8 +1425,15 @@ class VideoSnifferEngine(
                     try {
                         var fKey = Object.keys(window).find(function(k){ return k.indexOf('flashvars') !== -1; });
                         if (fKey && window[fKey] && window[fKey].mediaDefinitions) {
+                            var vDur = 0;
+                            try {
+                                vDur = parseFloat(window[fKey].video_duration || window[fKey].duration || (document.querySelector('video') && document.querySelector('video').duration) || 0);
+                            } catch(_) {}
+                            var vTitle = window[fKey].video_title || '';
                             var bridge = window.AndroidBridge || window.AndroidVideoSniffer;
-                            if (bridge && typeof bridge.processMediaDefinitions === 'function') {
+                            if (bridge && typeof bridge.processMediaDefinitionsWithDuration === 'function') {
+                                bridge.processMediaDefinitionsWithDuration(JSON.stringify(window[fKey].mediaDefinitions), vDur, vTitle);
+                            } else if (bridge && typeof bridge.processMediaDefinitions === 'function') {
                                 bridge.processMediaDefinitions(JSON.stringify(window[fKey].mediaDefinitions));
                             } else if (bridge && typeof bridge.onMediaDefinitionsFound === 'function') {
                                 bridge.onMediaDefinitionsFound(JSON.stringify(window[fKey].mediaDefinitions));

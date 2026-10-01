@@ -102,7 +102,11 @@ class DownloadManagerController(
                 if (!destDir.exists()) destDir.mkdirs()
 
                 val rawSanitized = task.fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
-                val isHlsStream = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
+                val urlLower = task.url.lowercase()
+                val isExplicitMp4 = urlLower.contains(".mp4") || urlLower.contains(".webm") || urlLower.contains(".mkv") ||
+                        urlLower.contains(".mp3") || task.mimeType.contains("video/mp4", ignoreCase = true) ||
+                        task.mimeType.contains("audio/", ignoreCase = true) || rawSanitized.endsWith(".mp4", ignoreCase = true)
+                val isHlsStream = !isExplicitMp4 && (task.isM3u8 || urlLower.contains(".m3u8") || task.mimeType.contains("mpegurl", ignoreCase = true))
                 val sanitizedName = if (isHlsStream) {
                     if (rawSanitized.endsWith(".mp4", ignoreCase = true)) {
                         rawSanitized.substringBeforeLast('.') + ".ts"
@@ -112,7 +116,12 @@ class DownloadManagerController(
                         rawSanitized
                     }
                 } else {
-                    rawSanitized
+                    if (!rawSanitized.contains(".") || rawSanitized.endsWith(".")) {
+                        val defaultExt = if (task.mimeType.contains("audio") || task.fileName.endsWith(".mp3")) ".mp3" else ".mp4"
+                        "${rawSanitized.trimEnd('.')}$defaultExt"
+                    } else {
+                        rawSanitized
+                    }
                 }
                 val outputFile = File(destDir, sanitizedName)
                 downloadDao.updateLocalFilePath(task.id, outputFile.absolutePath)

@@ -228,8 +228,8 @@ fun ActiveDownloadTaskCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (task.isM3u8) {
-                        GlassBadge(text = "HLS Stream", color = GlassTheme.colors.secondaryGlow)
+                    if (isAudio) {
+                        GlassBadge(text = "Audio", color = GlassTheme.colors.secondaryGlow)
                     }
                     val statusColor = when (task.status) {
                         DownloadStatus.DOWNLOADING -> GlassTheme.colors.accentGlow

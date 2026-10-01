@@ -547,17 +547,18 @@ class Phase2SnifferTest {
             totalBytes = 60 * 1024 * 1024L,
             progressFraction = 0.25f
         )
-        assertTrue(knownTotal.contains("15 MB / ~60 MB"))
+        assertTrue(knownTotal.contains("15 MB / 60 MB") || knownTotal.contains("15 MB / ~60 MB"))
         assertTrue(knownTotal.contains("25%"))
         assertFalse(knownTotal.contains("Segment"))
 
-        // Streaming without fixed size
+        // Streaming without fixed size: properly projects total video size (22 MB at 50% = ~44 MB)
         val streaming = ir.ali0003.downloader.downloader.model.DownloadProgress.formatCleanMetric(
             downloadedBytes = 22 * 1024 * 1024L,
             totalBytes = 0L,
             progressFraction = 0.50f
         )
-        assertEquals("22 MB  •  50%", streaming)
+        assertTrue(streaming.contains("22 MB / ~44 MB"))
+        assertTrue(streaming.contains("50%"))
         assertFalse(streaming.contains("Segment"))
     }
 }
