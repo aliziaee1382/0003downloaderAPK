@@ -22,11 +22,19 @@ android {
 
   signingConfigs {
     create("release") {
-      val keystoreFile = file("${System.getenv("CM_BUILD_DIR") ?: project.rootDir}/my-upload-key.jks")
-      storeFile = keystoreFile
-      storePassword = "ali13821382ali"
-      keyAlias = "upload"
-      keyPassword = "ali13821382ali"
+      val uploadKey = file("${System.getenv("CM_BUILD_DIR") ?: project.rootDir}/my-upload-key.jks")
+      val debugKey = file("${rootDir}/debug.keystore")
+      if (uploadKey.exists()) {
+        storeFile = uploadKey
+        storePassword = "ali13821382ali"
+        keyAlias = "upload"
+        keyPassword = "ali13821382ali"
+      } else if (debugKey.exists()) {
+        storeFile = debugKey
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
