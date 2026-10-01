@@ -16,17 +16,20 @@ class DownloadEngine(
 ) {
     private val chunkDownloader = ChunkDownloader(context)
     private val hlsDownloader = HlsSegmentDownloader(context)
+    private val dashDownloader = DashStreamDownloader(context)
 
     fun startDownload(
         task: DownloadTaskEntity,
         outputFile: File
     ): Flow<DownloadProgress> {
         val urlLower = task.url.lowercase()
+        val isDash = task.url.contains("|") || urlLower.contains(".mpd") || task.mimeType.contains("dash", ignoreCase = true)
         val isHls = task.isM3u8 || urlLower.contains(".m3u8") || task.mimeType.contains("mpegurl", ignoreCase = true)
 
-        android.util.Log.d("DownloadEngine", "Routing task ${task.id} (${task.fileName}): isHls=$isHls (url=${task.url})")
+        android.util.Log.d("DownloadEngine", "Routing task ${task.id} (${task.fileName}): isDash=$isDash, isHls=$isHls (url=${task.url})")
 
         return when {
+            isDash -> dashDownloader.downloadDash(task, outputFile)
             isHls -> hlsDownloader.downloadHls(task, outputFile)
             else -> chunkDownloader.download(task, outputFile)
         }

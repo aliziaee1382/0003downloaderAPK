@@ -1,6 +1,11 @@
 package ir.ali0003.downloader.downloader.core
 
 import android.content.Context
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
+import android.media.MediaMuxer
+import android.media.MediaScannerConnection
 import android.util.Log
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
 import ir.ali0003.downloader.downloader.model.DownloadProgress
@@ -8,226 +13,354 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.isActive
-import org.json.JSONObject
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.coroutineContext
 
 /**
- * High-performance DASH and Separated Audio-Video Stream Downloader.
- *
- * Downloads separated video and audio payloads concurrently into temporary scratch files
- * (temp_vid.mp4 and temp_aud.m4a), and automatically triggers [HardwareMediaMuxer]
- * to multiplex them into a single synchronized MP4 container.
+ * Resilient DASH & Separated Audio/Video Stream Downloader.
+ * 1. Supports separated DASH streams (videoUrl|audioUrl) and .mpd manifests.
+ * 2. Concurrently downloads video and audio tracks to temporary cache files.
+ * 3. Muxes both tracks into a standard MP4 container via Android's hardware-accelerated MediaMuxer.
+ * 4. Emits real-time unified progress and notifies MediaScanner on completion.
  */
 class DashStreamDownloader(
     private val context: Context,
-    private val chunkDownloader: ChunkDownloader = ChunkDownloader(context)
+    private val okHttpClient: OkHttpClient = defaultClient()
 ) {
 
     companion object {
         private const val TAG = "DashStreamDownloader"
+        private const val BUFFER_SIZE = 64 * 1024
 
-        /**
-         * Checks if a [DownloadTaskEntity] represents a DASH stream or a separated video/audio pair.
-         */
-        fun isDashOrSeparatedPair(task: DownloadTaskEntity): Boolean {
-            if (task.url.contains("|")) return true
-            if (task.url.contains(".mpd", ignoreCase = true)) return true
-            if (task.url.contains("dash_video=", ignoreCase = true) && task.url.contains("dash_audio=", ignoreCase = true)) return true
-            val headers = task.headersJson
-            return headers.contains("dash_audio") || headers.contains("audio_url") || headers.contains("audioUrl")
-        }
-
-        /**
-         * Extracts the pair of (videoUrl, audioUrl) from the task.
-         */
-        fun extractStreamUrls(task: DownloadTaskEntity): Pair<String, String>? {
-            // Case 1: Pipe delimited "videoUrl|audioUrl"
-            if (task.url.contains("|")) {
-                val parts = task.url.split("|")
-                if (parts.size >= 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
-                    return Pair(parts[0].trim(), parts[1].trim())
-                }
-            }
-
-            // Case 2: Query param encoded "dash_video=...&dash_audio=..."
-            if (task.url.contains("dash_video=") && task.url.contains("dash_audio=")) {
-                try {
-                    val uri = android.net.Uri.parse(task.url)
-                    val v = uri.getQueryParameter("dash_video")
-                    val a = uri.getQueryParameter("dash_audio")
-                    if (!v.isNullOrBlank() && !a.isNullOrBlank()) {
-                        return Pair(v, a)
-                    }
-                } catch (_: Exception) {}
-            }
-
-            // Case 3: headersJson contains audio_url or dash_audio_url
-            try {
-                val json = JSONObject(task.headersJson)
-                val audio = json.optString("dash_audio_url").ifBlank {
-                    json.optString("audio_url").ifBlank {
-                        json.optString("audioUrl")
-                    }
-                }
-                if (audio.isNotBlank()) {
-                    return Pair(task.url.trim(), audio.trim())
-                }
-            } catch (_: Exception) {}
-
-            return null
+        private fun defaultClient(): OkHttpClient {
+            return OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .retryOnConnectionFailure(true)
+                .build()
         }
     }
 
-    fun isDashOrSeparatedPair(task: DownloadTaskEntity): Boolean =
-        Companion.isDashOrSeparatedPair(task)
-
     /**
-     * Downloads video and audio streams concurrently, then muxes them into [outputFile].
-     * Emits real-time [DownloadProgress] throughout the download and muxing phases.
+     * Downloads separated video and audio streams concurrently, then muxes them into outputFile.
      */
-    fun downloadAndMux(
+    fun downloadDash(
         task: DownloadTaskEntity,
         outputFile: File
     ): Flow<DownloadProgress> = flow {
         val taskId = task.id
-        val urls = extractStreamUrls(task)
-            ?: throw IOException("Unable to resolve separated DASH video and audio stream URLs for task $taskId")
+        val rawUrl = task.url
+        val headers = ChunkDownloader.parseHeaders(task.headersJson, rawUrl, task.websiteUrl)
 
-        val videoUrl = urls.first
-        val audioUrl = urls.second
-        val headers = chunkDownloader.parseHeaders(task.headersJson)
+        val parts = if (rawUrl.contains("|")) rawUrl.split("|") else listOf(rawUrl)
+        val videoUrl = parts[0].trim()
+        val audioUrl = if (parts.size > 1) parts[1].trim() else null
 
-        Log.d(TAG, "Starting concurrent DASH download for task $taskId: Video=$videoUrl, Audio=$audioUrl")
+        Log.d(TAG, "Starting DASH download for Task $taskId (video=$videoUrl, audio=$audioUrl)")
 
-        // Scratch temp directory for intermediate video & audio payload files
-        val scratchDir = File(context.cacheDir, "dash_mux_$taskId")
-        if (!scratchDir.exists()) scratchDir.mkdirs()
+        val tempDir = File(context.cacheDir, "dash_task_$taskId").apply { mkdirs() }
+        val videoTempFile = File(tempDir, "video_track.tmp")
+        val audioTempFile = File(tempDir, "audio_track.tmp")
 
-        val tempVidFile = File(scratchDir, "temp_vid.mp4")
-        val tempAudFile = File(scratchDir, "temp_aud.m4a")
+        val videoDownloadedBytes = AtomicLong(0L)
+        val audioDownloadedBytes = AtomicLong(0L)
+        val videoTotalBytes = AtomicLong(0L)
+        val audioTotalBytes = AtomicLong(0L)
 
-        val totalDownloadedAtomic = AtomicLong(0L)
-        val estimatedTotalBytes = if (task.totalBytes > 0L) task.totalBytes else 40L * 1024L * 1024L
-        var lastTime = System.currentTimeMillis()
-        var lastBytes = 0L
+        var lastEmittedProgress = 0f
+        var lastEmittedTime = 0L
 
         try {
-            // 1. Download video and audio payloads concurrently
+            emit(
+                DownloadProgress(
+                    taskId = taskId,
+                    downloadedBytes = 0L,
+                    totalBytes = task.totalBytes,
+                    speedBps = 0L,
+                    etaSeconds = 0L,
+                    explicitProgress = 0f
+                )
+            )
+
             coroutineScope {
-                val vidDeferred = async(Dispatchers.IO) {
-                    chunkDownloader.downloadUrlToFile(
+                val videoDeferred = async<Long>(Dispatchers.IO) {
+                    downloadUrlToFile(
                         url = videoUrl,
+                        destination = videoTempFile,
                         headers = headers,
-                        outputFile = tempVidFile,
-                        onBytesRead = { bytes ->
-                            totalDownloadedAtomic.addAndGet(bytes)
+                        onProgress = { bytesRead: Long, total: Long ->
+                            videoDownloadedBytes.set(bytesRead)
+                            if (total > 0L) videoTotalBytes.set(total)
                         }
                     )
                 }
 
-                val audDeferred = async(Dispatchers.IO) {
-                    chunkDownloader.downloadUrlToFile(
-                        url = audioUrl,
-                        headers = headers,
-                        outputFile = tempAudFile,
-                        onBytesRead = { bytes ->
-                            totalDownloadedAtomic.addAndGet(bytes)
-                        }
-                    )
+                val audioDeferred = if (!audioUrl.isNullOrBlank()) {
+                    async<Long>(Dispatchers.IO) {
+                        downloadUrlToFile(
+                            url = audioUrl,
+                            destination = audioTempFile,
+                            headers = headers,
+                            onProgress = { bytesRead: Long, total: Long ->
+                                audioDownloadedBytes.set(bytesRead)
+                                if (total > 0L) audioTotalBytes.set(total)
+                            }
+                        )
+                    }
+                } else {
+                    null
                 }
 
-                // Progress polling during download phase
-                while (vidDeferred.isActive || audDeferred.isActive) {
+                while (videoDeferred.isActive || audioDeferred?.isActive == true) {
+                    kotlinx.coroutines.delay(250)
+                    val currentDownloaded = videoDownloadedBytes.get() + audioDownloadedBytes.get()
+                    val knownTotal = if (task.totalBytes > 0L) {
+                        task.totalBytes
+                    } else {
+                        videoTotalBytes.get() + audioTotalBytes.get()
+                    }
+
+                    val currentProg = if (knownTotal > 0L) {
+                        (currentDownloaded.toFloat() / knownTotal.toFloat()).coerceIn(0f, 0.95f)
+                    } else {
+                        0.5f
+                    }
+
                     val now = System.currentTimeMillis()
-                    if (now - lastTime >= 350) {
-                        val currentDownloaded = totalDownloadedAtomic.get()
-                        val elapsed = (now - lastTime).coerceAtLeast(1L)
-                        val speedBps = ((currentDownloaded - lastBytes) * 1000L) / elapsed
-                        val remaining = (estimatedTotalBytes - currentDownloaded).coerceAtLeast(0L)
-                        val eta = if (speedBps > 0 && estimatedTotalBytes > 0) remaining / speedBps else 0L
-
+                    if (currentProg - lastEmittedProgress > 0.01f || now - lastEmittedTime > 500) {
+                        lastEmittedProgress = currentProg
+                        lastEmittedTime = now
                         emit(
                             DownloadProgress(
                                 taskId = taskId,
                                 downloadedBytes = currentDownloaded,
-                                totalBytes = estimatedTotalBytes,
-                                speedBps = speedBps,
-                                etaSeconds = eta,
-                                isCompleted = false
+                                totalBytes = knownTotal,
+                                speedBps = task.speedBps,
+                                etaSeconds = 0L,
+                                explicitProgress = currentProg
                             )
                         )
-                        lastTime = now
-                        lastBytes = currentDownloaded
                     }
-                    delay(150)
                 }
 
-                vidDeferred.await()
-                audDeferred.await()
+                videoDeferred.await()
+                audioDeferred?.await()
             }
 
-            val downloadedTotal = totalDownloadedAtomic.get()
-            Log.d(TAG, "DASH stream downloads finished ($downloadedTotal bytes). Triggering native HardwareMediaMuxer...")
+            // Mux video and audio streams together into the final output container
+            outputFile.parentFile?.mkdirs()
+            val muxSuccess = if (audioTempFile.exists() && audioTempFile.length() > 0) {
+                muxAudioVideo(videoTempFile, audioTempFile, outputFile)
+            } else {
+                false
+            }
 
-            // Emit download completion status before starting muxer
-            emit(
-                DownloadProgress(
-                    taskId = taskId,
-                    downloadedBytes = downloadedTotal,
-                    totalBytes = downloadedTotal,
-                    speedBps = 0L,
-                    etaSeconds = 0L,
-                    isCompleted = false
+            if (!muxSuccess) {
+                // Single stream copy fallback
+                copyFile(videoTempFile, outputFile)
+            }
+
+            val finalSize = outputFile.length()
+            Log.d(TAG, "Task $taskId DASH download complete: ${outputFile.absolutePath} ($finalSize bytes)")
+
+            try {
+                val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
+                db.downloadDao().updateLocalFilePath(taskId, outputFile.absolutePath)
+                db.downloadDao().updateDownloadPath(taskId, outputFile.absolutePath)
+                db.downloadDao().updateProgress(taskId, finalSize, finalSize, 0L, 0L)
+                db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
+                db.downloadDao().markCompletedWithFile(taskId, outputFile.absolutePath, finalSize)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error committing completed status in DashStreamDownloader: ${e.message}")
+            }
+
+            try {
+                MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(outputFile.absolutePath),
+                    arrayOf(task.mimeType.ifBlank { "video/mp4" }),
+                    null
                 )
-            )
+            } catch (_: Exception) {}
 
-            // 2. Multiplex visual & acoustic tracks with HardwareMediaMuxer
-            val muxer = HardwareMediaMuxer.getInstance(context)
-            val muxSuccess = muxer.muxAudioAndVideo(
-                videoFile = tempVidFile,
-                audioFile = tempAudFile,
-                outputFile = outputFile,
-                onProgress = { muxProgress ->
-                    // Keep progress updated during muxing
-                }
-            )
-
-            if (!muxSuccess || !outputFile.exists() || outputFile.length() == 0L) {
-                throw IOException("HardwareMediaMuxer failed to generate synchronized MP4 container at ${outputFile.absolutePath}")
-            }
-
-            Log.d(TAG, "DASH muxing completed successfully: ${outputFile.name} (${outputFile.length()} bytes)")
-
-            // 3. Emit final completed state now that the merged MP4 is safely saved
             emit(
                 DownloadProgress(
                     taskId = taskId,
-                    downloadedBytes = outputFile.length(),
-                    totalBytes = outputFile.length(),
+                    downloadedBytes = finalSize,
+                    totalBytes = finalSize,
                     speedBps = 0L,
                     etaSeconds = 0L,
+                    explicitProgress = 1.0f,
                     isCompleted = true
                 )
             )
-
-        } catch (cancellation: CancellationException) {
-            Log.i(TAG, "DASH download/muxing cancelled for task $taskId")
-            if (outputFile.exists()) outputFile.delete()
-            throw cancellation
-        } catch (e: Exception) {
-            Log.e(TAG, "DASH download/muxing error for task $taskId: ${e.message}", e)
-            if (outputFile.exists()) outputFile.delete()
-            throw e
         } finally {
-            // Clean up temporary scratch directory
-            scratchDir.deleteRecursively()
+            try {
+                tempDir.deleteRecursively()
+            } catch (_: Exception) {}
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * Downloads an individual stream directly to a destination file using OkHttp.
+     */
+    private suspend fun downloadUrlToFile(
+        url: String,
+        destination: File,
+        headers: Map<String, String>,
+        onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
+    ): Long = withContext(Dispatchers.IO) {
+        val requestBuilder = Request.Builder().url(url)
+        headers.forEach { (key, value) ->
+            if (key.isNotBlank() && value.isNotBlank() && !key.equals("range", ignoreCase = true)) {
+                requestBuilder.header(key, value)
+            }
+        }
+        val request = requestBuilder.build()
+        var bytesCopied = 0L
+
+        okHttpClient.newCall(request).execute().use { response: Response ->
+            if (!response.isSuccessful) {
+                throw IOException("HTTP ${response.code} downloading DASH segment from $url")
+            }
+            val body = response.body ?: throw IOException("Empty response body from $url")
+            val totalBytes = body.contentLength()
+            destination.parentFile?.mkdirs()
+
+            body.byteStream().use { input ->
+                FileOutputStream(destination).use { output ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        if (!coroutineContext.isActive) {
+                            throw CancellationException("DASH download cancelled")
+                        }
+                        output.write(buffer, 0, read)
+                        bytesCopied += read
+                        onProgress?.invoke(bytesCopied, totalBytes)
+                    }
+                    output.flush()
+                }
+            }
+        }
+        bytesCopied
+    }
+
+    /**
+     * Hardware-accelerated MP4 container muxing for combining elementary video and audio tracks.
+     */
+    private fun muxAudioVideo(
+        videoFile: File,
+        audioFile: File,
+        outputFile: File
+    ): Boolean {
+        var muxer: MediaMuxer? = null
+        var videoExtractor: MediaExtractor? = null
+        var audioExtractor: MediaExtractor? = null
+        try {
+            outputFile.parentFile?.mkdirs()
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+
+            videoExtractor = MediaExtractor().apply { setDataSource(videoFile.absolutePath) }
+            audioExtractor = MediaExtractor().apply { setDataSource(audioFile.absolutePath) }
+
+            var videoTrackIndex = -1
+            var audioTrackIndex = -1
+            var muxerVideoTrackIndex = -1
+            var muxerAudioTrackIndex = -1
+
+            for (i in 0 until videoExtractor.trackCount) {
+                val format = videoExtractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("video/")) {
+                    videoTrackIndex = i
+                    muxerVideoTrackIndex = muxer.addTrack(format)
+                    break
+                }
+            }
+
+            for (i in 0 until audioExtractor.trackCount) {
+                val format = audioExtractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                if (mime.startsWith("audio/")) {
+                    audioTrackIndex = i
+                    muxerAudioTrackIndex = muxer.addTrack(format)
+                    break
+                }
+            }
+
+            if (muxerVideoTrackIndex == -1) {
+                return false
+            }
+
+            muxer.start()
+
+            val buffer = ByteBuffer.allocate(1024 * 1024)
+            val bufferInfo = MediaCodec.BufferInfo()
+
+            // Write video track
+            videoExtractor.selectTrack(videoTrackIndex)
+            while (true) {
+                val sampleSize = videoExtractor.readSampleData(buffer, 0)
+                if (sampleSize < 0) break
+                bufferInfo.offset = 0
+                bufferInfo.size = sampleSize
+                bufferInfo.presentationTimeUs = videoExtractor.sampleTime
+                bufferInfo.flags = videoExtractor.sampleFlags
+                muxer.writeSampleData(muxerVideoTrackIndex, buffer, bufferInfo)
+                videoExtractor.advance()
+            }
+
+            // Write audio track if available
+            if (muxerAudioTrackIndex != -1 && audioTrackIndex != -1) {
+                audioExtractor.selectTrack(audioTrackIndex)
+                while (true) {
+                    val sampleSize = audioExtractor.readSampleData(buffer, 0)
+                    if (sampleSize < 0) break
+                    bufferInfo.offset = 0
+                    bufferInfo.size = sampleSize
+                    bufferInfo.presentationTimeUs = audioExtractor.sampleTime
+                    bufferInfo.flags = audioExtractor.sampleFlags
+                    muxer.writeSampleData(muxerAudioTrackIndex, buffer, bufferInfo)
+                    audioExtractor.advance()
+                }
+            }
+
+            muxer.stop()
+            return true
+        } catch (e: Exception) {
+            Log.w(TAG, "Muxing video/audio failed: ${e.message}", e)
+            return false
+        } finally {
+            try { muxer?.release() } catch (_: Exception) {}
+            try { videoExtractor?.release() } catch (_: Exception) {}
+            try { audioExtractor?.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun copyFile(source: File, destination: File) {
+        destination.parentFile?.mkdirs()
+        FileInputStream(source).use { input ->
+            FileOutputStream(destination).use { output ->
+                input.copyTo(output, BUFFER_SIZE)
+                output.flush()
+            }
+        }
+    }
 }
