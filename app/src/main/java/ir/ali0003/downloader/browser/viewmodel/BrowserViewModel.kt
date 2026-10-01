@@ -369,8 +369,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         .thenBy { it.estimatedSizeBytes }
                 )
 
-            // Prioritize the stable segmented HLS stream when available so that downloads are complete and robust
-            val chosen = hlsCandidate ?: mp4Candidate ?: optionsInTier.firstOrNull()
+            // Prioritize direct MP4 candidate for fast, complete, high-speed single file download
+            val chosen = mp4Candidate ?: hlsCandidate ?: optionsInTier.firstOrNull()
             if (chosen != null) {
                 val isStreamHls = chosen.isHlsVariant || chosen.formatTag.contains("HLS", ignoreCase = true) || chosen.url.contains(".m3u8", ignoreCase = true)
                 val format = if (isStreamHls) "HLS" else "MP4"

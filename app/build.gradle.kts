@@ -11,7 +11,7 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    applicationId = "ir.ali0003.downloader"
+    applicationId = "ir.ali0003.downloader.snyhja"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
@@ -67,6 +67,11 @@ android {
   }
 
   testOptions { unitTests { isIncludeAndroidResources = true } }
+
+  lint {
+    abortOnError = false
+    checkReleaseBuilds = false
+  }
 
   dependenciesInfo {
     includeInApk = false

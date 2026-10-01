@@ -1119,40 +1119,40 @@ class VideoSnifferEngine(
 
         // 5. Video Tiers Grouping & Deduplication:
         // Group by distinct resolution height.
-        // For each resolution tier: prioritize the reliable multi-segment HLS stream when available.
+        // For each resolution tier: prioritize direct MP4 video files when available.
         val deduplicatedVideoTiers = mutableListOf<VideoQualityOption>()
         val groupedByHeight = videoOptions.groupBy { it.getResolutionHeight() }
 
         for ((height, optionsInHeight) in groupedByHeight) {
-            val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) || it.url.contains(".m3u8", ignoreCase = true) }
-                .maxWithOrNull(
-                    compareBy<VideoQualityOption> { it.bandwidthBps }
-                        .thenBy { it.estimatedSizeBytes }
-                )
             val mp4Candidate = optionsInHeight.filter { !it.isHlsVariant && !it.formatTag.contains("HLS", ignoreCase = true) && !it.url.contains(".m3u8", ignoreCase = true) }
                 .maxWithOrNull(
                     compareBy<VideoQualityOption> { if (it.estimatedSizeBytes > 0L) 1 else 0 }
                         .thenBy { it.bandwidthBps.coerceAtLeast(it.estimatedSizeBytes) }
                 )
+            val hlsCandidate = optionsInHeight.filter { it.isHlsVariant || it.formatTag.contains("HLS", ignoreCase = true) || it.url.contains(".m3u8", ignoreCase = true) }
+                .maxWithOrNull(
+                    compareBy<VideoQualityOption> { it.bandwidthBps }
+                        .thenBy { it.estimatedSizeBytes }
+                )
 
             val chosen = when {
-                hlsCandidate != null -> {
-                    if (hlsCandidate.estimatedSizeBytes <= 0L) {
-                        val est = if (durationSeconds > 0.0 && hlsCandidate.bandwidthBps > 0L) {
-                            ((hlsCandidate.bandwidthBps * durationSeconds) / 8.0).toLong()
-                        } else if (mp4Candidate?.estimatedSizeBytes ?: 0L > 0L) {
-                            mp4Candidate!!.estimatedSizeBytes
-                        } else 0L
-                        if (est > 0L) hlsCandidate.copy(estimatedSizeBytes = est) else hlsCandidate
-                    } else hlsCandidate
-                }
                 mp4Candidate != null -> {
                     if (mp4Candidate.estimatedSizeBytes <= 0L) {
                         val est = if (durationSeconds > 0.0 && mp4Candidate.bandwidthBps > 0L) {
                             ((mp4Candidate.bandwidthBps * durationSeconds) / 8.0).toLong()
+                        } else if (hlsCandidate?.estimatedSizeBytes ?: 0L > 0L) {
+                            hlsCandidate!!.estimatedSizeBytes
                         } else 0L
                         if (est > 0L) mp4Candidate.copy(estimatedSizeBytes = est) else mp4Candidate
                     } else mp4Candidate
+                }
+                hlsCandidate != null -> {
+                    if (hlsCandidate.estimatedSizeBytes <= 0L) {
+                        val est = if (durationSeconds > 0.0 && hlsCandidate.bandwidthBps > 0L) {
+                            ((hlsCandidate.bandwidthBps * durationSeconds) / 8.0).toLong()
+                        } else 0L
+                        if (est > 0L) hlsCandidate.copy(estimatedSizeBytes = est) else hlsCandidate
+                    } else hlsCandidate
                 }
                 else -> optionsInHeight.firstOrNull()
             }

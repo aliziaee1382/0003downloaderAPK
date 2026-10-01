@@ -442,7 +442,11 @@ fun InAppBrowserScreen(
                                             view: WebView?,
                                             detail: RenderProcessGoneDetail?
                                         ): Boolean {
-                                            val didCrash = detail?.didCrash() ?: true
+                                            val didCrash = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                                detail?.didCrash() ?: true
+                                            } else {
+                                                true
+                                            }
                                             android.util.Log.e("InAppBrowser", "onRenderProcessGone detected (crashed: $didCrash)")
                                             try {
                                                 view?.let {
