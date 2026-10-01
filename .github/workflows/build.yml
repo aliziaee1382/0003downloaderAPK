@@ -18,15 +18,17 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Grant Execute Permission for Gradlew
-      run: chmod +x gradlew
+    - name: Fix line endings and permissions for gradlew
+      run: |
+        sed -i 's/\r$//' gradlew
+        chmod +x gradlew
 
     - name: Build Release APK
-      run: ./gradlew assembleRelease --stacktrace
+      run: ./gradlew assembleRelease --no-daemon --stacktrace
 
     - name: Upload Release APK
+      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: 0003-Downloader-Release-APK
