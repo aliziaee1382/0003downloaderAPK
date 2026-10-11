@@ -93,10 +93,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var simulationJob: Job? = null
 
-    init {
-        purgeDemoSeedData()
-    }
-
     fun applyTheme(mode: ThemeMode, colorKey: String) {
         themePreferences.saveTheme(mode, colorKey)
     }
@@ -346,12 +342,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
-        }
-    }
-
-    private fun purgeDemoSeedData() {
-        viewModelScope.launch {
-            repository.deleteSeedTasks()
         }
     }
 }

@@ -15,6 +15,7 @@ import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -414,17 +415,21 @@ class HlsSegmentDownloader(
         }
 
         val body = response.body ?: throw IOException("Empty response body for segment: $segmentUrl")
-        var bytesRead = 0L
+        val byteBuffer = ByteArrayOutputStream()
 
         body.byteStream().use { inputStream ->
             val buffer = ByteArray(BUFFER_SIZE)
             var len: Int
             while (inputStream.read(buffer).also { len = it } != -1) {
-                outputStream.write(buffer, 0, len)
-                bytesRead += len
+                byteBuffer.write(buffer, 0, len)
             }
         }
-        return bytesRead
+
+        // Only transfer to destination stream when the entire segment has been downloaded successfully
+        val segmentBytes = byteBuffer.toByteArray()
+        outputStream.write(segmentBytes)
+        outputStream.flush()
+        return segmentBytes.size.toLong()
     }
 
     private fun resolveUrl(baseUrl: String, relativeUrl: String): String {
