@@ -89,7 +89,10 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import ir.ali0003.downloader.data.local.DownloadTaskEntity
@@ -170,9 +173,25 @@ fun InAppVideoPlayerSheet(
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .build()
 
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15000,
+                /* maxBufferMs = */ 50000,
+                /* bufferForPlaybackMs = */ 500,
+                /* bufferForPlaybackAfterRebufferMs = */ DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
+            )
+            .build()
+
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setTsExtractorFlags(
+                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
+                DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
+            )
+
         val mediaSourceFactory = if (hasLocalFile || task.status == ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED) {
             val defaultDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context)
-            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(defaultDataSourceFactory)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(defaultDataSourceFactory, extractorsFactory)
         } else {
             val headers = ir.ali0003.downloader.downloader.core.ChunkDownloader.parseHeaders(task.headersJson, task.url)
             val httpDataSourceFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
@@ -182,11 +201,12 @@ fun InAppVideoPlayerSheet(
             headers["User-Agent"]?.let { httpDataSourceFactory.setUserAgent(it) }
             httpDataSourceFactory.setDefaultRequestProperties(headers)
             val defaultDataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(context, httpDataSourceFactory)
-            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(defaultDataSourceFactory)
+            androidx.media3.exoplayer.source.DefaultMediaSourceFactory(defaultDataSourceFactory, extractorsFactory)
         }
 
         ExoPlayer.Builder(context)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build().apply {
@@ -228,14 +248,11 @@ fun InAppVideoPlayerSheet(
 
         val local = targetLocalFile
         if (local != null && local.exists() && local.length() > 0L && !isPlaceholderFile(local)) {
-            val mime = detectLocalVideoMimeType(local)
-            Log.d("InAppVideoPlayer", "Playing local file directly: ${local.absolutePath} (size: ${local.length()} B, mime: $mime)")
-            val item = MediaItem.Builder()
-                .setUri(Uri.fromFile(local))
-                .setMimeType(mime)
-                .build()
+            Log.d("InAppVideoPlayer", "Playing local file directly: ${local.absolutePath} (size: ${local.length()} B)")
+            val item = MediaItem.fromUri(Uri.fromFile(local))
             exoPlayer.setMediaItem(item)
             exoPlayer.prepare()
+            exoPlayer.playWhenReady = true
             exoPlayer.play()
         } else if (task.status != ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED && task.url.isNotBlank()) {
             val isHls = task.isM3u8 || task.url.contains(".m3u8", ignoreCase = true)
@@ -246,10 +263,7 @@ fun InAppVideoPlayerSheet(
                     .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
                     .build()
             } else {
-                MediaItem.Builder()
-                    .setUri(Uri.parse(task.url))
-                    .setMimeType(androidx.media3.common.MimeTypes.VIDEO_MP4)
-                    .build()
+                MediaItem.fromUri(Uri.parse(task.url))
             }
             exoPlayer.setMediaItem(item)
             exoPlayer.prepare()
@@ -263,15 +277,25 @@ fun InAppVideoPlayerSheet(
     // Player event listener & clean resource release
     DisposableEffect(exoPlayer) {
         val listener = object : Player.Listener {
+            override fun onRenderedFirstFrame() {
+                isBuffering = false
+            }
+
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                if (playing) {
+                    isBuffering = false
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                isBuffering = playbackState == Player.STATE_BUFFERING
+                isBuffering = (playbackState == Player.STATE_BUFFERING)
                 if (playbackState == Player.STATE_READY) {
                     duration = exoPlayer.duration.coerceAtLeast(0L)
+                    isBuffering = false
                     playbackError = null
+                } else if (playbackState == Player.STATE_ENDED) {
+                    isBuffering = false
                 }
             }
 
@@ -425,7 +449,7 @@ fun InAppVideoPlayerSheet(
             }
 
             // 4. Buffering Spinner
-            if (isBuffering && playbackError == null) {
+            if (isBuffering && !isPlaying && playbackError == null) {
                 Box(
                     modifier = Modifier
                         .size(72.dp)
@@ -751,8 +775,12 @@ fun InAppVideoPlayerSheet(
                                 .clickable {
                                     if (exoPlayer.isPlaying) {
                                         exoPlayer.pause()
+                                        isPlaying = false
                                     } else {
+                                        exoPlayer.playWhenReady = true
                                         exoPlayer.play()
+                                        isPlaying = true
+                                        isBuffering = false
                                     }
                                 }
                                 .testTag("player_play_pause_button"),

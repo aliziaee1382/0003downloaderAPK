@@ -396,15 +396,25 @@ class VideoSnifferEngine(
                     }
 
                     if (!isSame) {
-                        // Purge previous video's aggregation state so the new video's manifest is parsed independently
                         synchronized(aggregationLock) {
-                            canonicalVideoItem = null
-                            accumulatedRawQualities.clear()
-                            accumulatedHeaders.clear()
+                            val previous = canonicalVideoItem
+                            val hasValidQualities = previous != null && (
+                                previous.qualities.isNotEmpty() ||
+                                previous.fileSizeBytes >= 1024 * 1024L ||
+                                previous.isM3u8 ||
+                                previous.durationSeconds >= 10.0
+                            )
+                            // If previous video has valid media qualities, DO NOT null it out or clear accumulated qualities
+                            // upon a raw active play event before the new video is actually parsed and verified.
+                            if (!hasValidQualities) {
+                                canonicalVideoItem = null
+                                accumulatedRawQualities.clear()
+                                accumulatedHeaders.clear()
+                            }
                         }
                     }
 
-                    // Immediately signal active play event so ViewModel clears old videos and resets counter
+                    // Signal active play event
                     onActivePlayStarted?.invoke(resolvedSrc, currentTitle)
 
                     // For stream manifests (HLS/DASH), notify UI immediately since it's a full adaptive stream
@@ -629,6 +639,13 @@ class VideoSnifferEngine(
                 var previous = canonicalVideoItem
                 val isSame = previous != null && (isSameVideoUrl(previous.url, targetUrl) || (previous.isM3u8 && isTargetHls && isSameHlsStream(previous.url, targetUrl)))
                 if (previous != null && !isSame) {
+                    val hasPreviousValidMedia = previous.qualities.isNotEmpty() ||
+                            previous.fileSizeBytes >= 1024 * 1024L ||
+                            previous.isM3u8 ||
+                            previous.durationSeconds >= 10.0
+                    if (hasPreviousValidMedia && extractedQualities.isEmpty()) {
+                        return@synchronized previous
+                    }
                     accumulatedRawQualities.clear()
                     accumulatedHeaders.clear()
                     canonicalVideoItem = null
@@ -1026,16 +1043,25 @@ class VideoSnifferEngine(
                     (previous.isM3u8 && isM3u8 && isSameHlsStream(previous.url, effectiveTargetUrl))
                 )
 
+                val isIncomingSubstantial = detectedSize >= 1536 * 1024L || finalDuration >= 10.0 || isAudioItem || (isM3u8 && qualities.isNotEmpty())
+                val hasPreviousValidMedia = previous != null && (
+                    previous.qualities.isNotEmpty() ||
+                    previous.fileSizeBytes >= 1024 * 1024L ||
+                    previous.isM3u8 ||
+                    previous.durationSeconds >= 10.0
+                )
+
                 if (isActivePlayEvent && !isSameVideo) {
-                    // Replace on Active Play:
-                    // Purge previous video's qualities, headers, and reference entirely so only this video's real qualities exist
-                    accumulatedRawQualities.clear()
-                    accumulatedHeaders.clear()
-                    canonicalVideoItem = null
-                    previous = null
+                    // Only purge previous video if the incoming item is substantial or previous was invalid/trivial.
+                    // If the incoming stream has no qualities or is a preview/micro-clip, preserve the existing valid video!
+                    if (isIncomingSubstantial || !hasPreviousValidMedia) {
+                        accumulatedRawQualities.clear()
+                        accumulatedHeaders.clear()
+                        canonicalVideoItem = null
+                        previous = null
+                    }
                 }
 
-                val isIncomingSubstantial = detectedSize >= 1536 * 1024L || finalDuration >= 10.0 || isAudioItem
                 val wasPreviousMicroClip = previous != null &&
                         !previous.mimeType.contains("audio", ignoreCase = true) &&
                         previous.fileSizeBytes in 1 until (1536 * 1024L) &&
@@ -1118,10 +1144,15 @@ class VideoSnifferEngine(
                     distinctItem
                 }
 
-                if (isSameVideo || previous == null || isActivePlayEvent) {
-                    canonicalVideoItem = updatedItem
+                val finalActiveItem = if (previous != null && hasPreviousValidMedia && updatedItem.qualities.isEmpty()) {
+                    previous
+                } else {
+                    if (isSameVideo || previous == null || (isActivePlayEvent && isIncomingSubstantial)) {
+                        canonicalVideoItem = updatedItem
+                    }
+                    updatedItem
                 }
-                updatedItem
+                finalActiveItem
             }
 
             mainHandler.post {
@@ -1682,8 +1713,16 @@ class VideoSnifferEngine(
             // Ignore cookie manager exception
         }
 
-        // 2. Referer and Origin headers to avoid 403 Forbidden on CDN/LMS hosts
+        // Retain existing session cookie if present
+        val existingCookie = existingHeaders["Cookie"] ?: existingHeaders["cookie"]
+        if (!existingCookie.isNullOrBlank()) {
+            headers["Cookie"] = existingCookie
+        }
+
+        // 2. Referer and Origin headers to maintain session context and avoid 403 Forbidden
         val effectivePageUrl = when {
+            existingHeaders["Referer"]?.isNotBlank() == true -> existingHeaders["Referer"]!!
+            existingHeaders["referer"]?.isNotBlank() == true -> existingHeaders["referer"]!!
             pageUrl.isNotBlank() -> pageUrl
             currentPageUrl.get().isNotBlank() -> currentPageUrl.get()
             else -> ""
@@ -1768,16 +1807,17 @@ class VideoSnifferEngine(
                     if (lower.indexOf('.m3u8') !== -1 || lower.indexOf('.mpd') !== -1 ||
                         lower.indexOf('.mp4') !== -1 || lower.indexOf('.webm') !== -1 ||
                         lower.indexOf('manifest') !== -1 || lower.indexOf('playlist') !== -1 ||
-                        lower.indexOf('master') !== -1) {
+                        lower.indexOf('master') !== -1 || lower.indexOf('mime=video') !== -1 ||
+                        lower.indexOf('format=m3u8') !== -1 || lower.indexOf('video/') !== -1) {
                         var full = normalizeUrl(url);
                         window.__recentMediaUrls.unshift({ url: full, time: Date.now() });
-                        if (window.__recentMediaUrls.length > 50) {
+                        if (window.__recentMediaUrls.length > 60) {
                             window.__recentMediaUrls.pop();
                         }
                     }
                 }
 
-                // 1. Hook window.fetch to capture stream manifests & direct media URLs
+                // 1. Hook window.fetch
                 try {
                     if (window.fetch) {
                         var origFetch = window.fetch;
@@ -1804,26 +1844,34 @@ class VideoSnifferEngine(
                     }
                 } catch(e) {}
 
-                // 3. Hook URL.createObjectURL to map blob URLs to original stream manifests
+                // 3. Hook URL.createObjectURL and webkitURL.createObjectURL to map blob URLs to original stream manifests
                 try {
-                    if (window.URL && typeof window.URL.createObjectURL === 'function') {
-                        var origCreateObjectURL = window.URL.createObjectURL;
-                        window.URL.createObjectURL = function(obj) {
-                            var blobUrl = origCreateObjectURL.call(window.URL, obj);
+                    var hookObjUrl = function(targetObj) {
+                        if (!targetObj || typeof targetObj.createObjectURL !== 'function' || targetObj.__hookedCreateObjectURL) return;
+                        targetObj.__hookedCreateObjectURL = true;
+                        var origCreate = targetObj.createObjectURL;
+                        targetObj.createObjectURL = function(obj) {
+                            var blobUrl = origCreate.call(targetObj, obj);
                             try {
                                 var now = Date.now();
                                 var match = (window.__recentMediaUrls && window.__recentMediaUrls.length > 0)
-                                    ? window.__recentMediaUrls.find(function(item) { return (now - item.time) < 15000; })
+                                    ? window.__recentMediaUrls.find(function(item) { return (now - item.time) < 30000; })
                                     : null;
 
-                                var sourceUrl = match ? match.url : (obj && (obj.__sourceUrl || obj.src || obj.url));
+                                var sourceUrl = (obj && (obj.__sourceUrl || obj.src || obj.url)) || (match ? match.url : null);
                                 if (sourceUrl) {
                                     window.__blobToSourceMap[blobUrl] = sourceUrl;
+                                    if (obj && typeof obj === 'object') {
+                                        obj.__sourceUrl = sourceUrl;
+                                        obj.__blobUrl = blobUrl;
+                                    }
                                 }
                             } catch(e) {}
                             return blobUrl;
                         };
-                    }
+                    };
+                    if (window.URL) hookObjUrl(window.URL);
+                    if (window.webkitURL) hookObjUrl(window.webkitURL);
                 } catch(e) {}
 
                 // 4. Hook MediaSource
@@ -1843,10 +1891,13 @@ class VideoSnifferEngine(
 
                 // 5. Hook HTMLVideoElement.prototype.src setter
                 try {
-                    var videoProto = window.HTMLVideoElement ? window.HTMLVideoElement.prototype : (window.HTMLMediaElement ? window.HTMLMediaElement.prototype : null);
-                    if (videoProto) {
-                        var desc = Object.getOwnPropertyDescriptor(videoProto, 'src') ||
-                                   (window.HTMLMediaElement ? Object.getOwnPropertyDescriptor(window.HTMLMediaElement.prototype, 'src') : null);
+                    var protoList = [
+                        window.HTMLVideoElement ? window.HTMLVideoElement.prototype : null,
+                        window.HTMLMediaElement ? window.HTMLMediaElement.prototype : null
+                    ];
+                    protoList.forEach(function(videoProto) {
+                        if (!videoProto) return;
+                        var desc = Object.getOwnPropertyDescriptor(videoProto, 'src');
                         if (desc && desc.set) {
                             var origSet = desc.set;
                             desc.set = function(val) {
@@ -1864,7 +1915,7 @@ class VideoSnifferEngine(
                             };
                             Object.defineProperty(videoProto, 'src', desc);
                         }
-                    }
+                    });
                 } catch(e) {}
             })();
         """
@@ -1878,63 +1929,83 @@ class VideoSnifferEngine(
                     return window.AndroidBridge || window.AndroidVideoSniffer || null;
                 }
 
-                document.addEventListener('play', function(e) {
-                    if (e.target && e.target.tagName === 'VIDEO') {
-                        var video = e.target;
-                        var bridge = getBridge();
-                        if (!bridge) return;
+                function onVideoPlayAction(video) {
+                    if (!video) return;
+                    var bridge = getBridge();
+                    if (!bridge) return;
 
-                        var title = document.title || '';
-                        try {
-                            var elemTitle = video.getAttribute('title') || video.getAttribute('aria-label');
-                            if (elemTitle) title = elemTitle;
-                        } catch(_) {}
+                    var title = document.title || '';
+                    try {
+                        var elemTitle = video.getAttribute('title') || video.getAttribute('aria-label');
+                        if (elemTitle) title = elemTitle;
+                    } catch(_) {}
 
-                        var currentSrcVal = video.currentSrc || video.src || '';
+                    var currentSrcVal = video.currentSrc || video.src || '';
 
-                        // 1. Immediately trigger active play window (500ms binding on Android)
-                        try {
-                            if (typeof bridge.onActivePlayTriggered === 'function') {
-                                bridge.onActivePlayTriggered(currentSrcVal, title);
-                            }
-                        } catch(_) {}
-
-                        var src = currentSrcVal;
-                        if (!src || src.indexOf('blob:') === 0) {
-                            var s = video.querySelector('source');
-                            if (s) {
-                                var sSrc = s.src || s.getAttribute('src');
-                                if (sSrc && sSrc.indexOf('blob:') !== 0) {
-                                    src = sSrc;
-                                }
-                            }
+                    // 1. Immediately trigger active play window (500ms binding on Android)
+                    try {
+                        if (typeof bridge.onActivePlayTriggered === 'function') {
+                            bridge.onActivePlayTriggered(currentSrcVal, title);
                         }
+                    } catch(_) {}
 
-                        // 2. Resolve blob: using URL.createObjectURL hook map or recent stream manifests
-                        if (src && src.indexOf('blob:') === 0) {
-                            var mapped = (window.__blobToSourceMap && window.__blobToSourceMap[src]) || video.__originalSourceUrl;
-                            if (!mapped && window.__recentMediaUrls && window.__recentMediaUrls.length > 0) {
-                                var now = Date.now();
-                                var match = window.__recentMediaUrls.find(function(item) {
-                                    return (now - item.time) < 15000;
-                                });
-                                if (match) mapped = match.url;
+                    var src = currentSrcVal;
+                    if (!src || src.indexOf('blob:') === 0) {
+                        var s = video.querySelector('source');
+                        if (s) {
+                            var sSrc = s.src || s.getAttribute('src');
+                            if (sSrc && sSrc.indexOf('blob:') !== 0) {
+                                src = sSrc;
                             }
-                            if (mapped) {
-                                src = mapped;
-                            }
-                        }
-
-                        // 3. Dispatch genuine stream source to Android client
-                        if (src && src.indexOf('blob:') !== 0) {
-                            try {
-                                if (typeof bridge.onActiveVideoDetected === 'function') {
-                                    bridge.onActiveVideoDetected(src, title);
-                                }
-                            } catch(_) {}
                         }
                     }
+
+                    // 2. Resolve blob: using URL.createObjectURL hook map or recent stream manifests
+                    if (src && src.indexOf('blob:') === 0) {
+                        var mapped = (window.__blobToSourceMap && window.__blobToSourceMap[src]) || video.__originalSourceUrl;
+                        if (!mapped && window.__recentMediaUrls && window.__recentMediaUrls.length > 0) {
+                            var now = Date.now();
+                            var match = window.__recentMediaUrls.find(function(item) {
+                                return (now - item.time) < 30000;
+                            });
+                            if (match) mapped = match.url;
+                        }
+                        if (mapped) {
+                            src = mapped;
+                        }
+                    }
+
+                    // 3. Dispatch genuine stream source to Android client
+                    if (src && src.indexOf('blob:') !== 0) {
+                        try {
+                            if (typeof bridge.onActiveVideoDetected === 'function') {
+                                bridge.onActiveVideoDetected(src, title);
+                            }
+                        } catch(_) {}
+                    }
+                }
+
+                // Listen for play and playing events in DOM capture phase
+                document.addEventListener('play', function(e) {
+                    if (e.target && (e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO')) {
+                        onVideoPlayAction(e.target);
+                    }
                 }, true);
+
+                document.addEventListener('playing', function(e) {
+                    if (e.target && (e.target.tagName === 'VIDEO' || e.target.tagName === 'AUDIO')) {
+                        onVideoPlayAction(e.target);
+                    }
+                }, true);
+
+                // Intercept HTMLMediaElement.prototype.play
+                try {
+                    var origPlay = HTMLMediaElement.prototype.play;
+                    HTMLMediaElement.prototype.play = function() {
+                        onVideoPlayAction(this);
+                        return origPlay.apply(this, arguments);
+                    };
+                } catch(e) {}
             })();
         """
 

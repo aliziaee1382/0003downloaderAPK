@@ -102,14 +102,17 @@ class HlsSegmentDownloader(
             // Ensure destination directory exists
             outputFile.parentFile?.mkdirs()
 
-            // Resolve clean target .ts file directly
-            val targetFile = if (outputFile.name.endsWith(".mp4", ignoreCase = true)) {
-                File(outputFile.parentFile, outputFile.name.removeSuffix(".mp4").removeSuffix(".MP4") + ".ts")
-            } else if (!outputFile.name.endsWith(".ts", ignoreCase = true)) {
-                File(outputFile.parentFile, "${outputFile.name}.ts")
+            val destFile = if (outputFile.name.endsWith(".ts", ignoreCase = true)) {
+                File(outputFile.parentFile, outputFile.name.removeSuffix(".ts").removeSuffix(".TS") + ".mp4")
+            } else if (!outputFile.name.endsWith(".mp4", ignoreCase = true)) {
+                File(outputFile.parentFile, "${outputFile.name}.mp4")
             } else {
                 outputFile
             }
+
+            // 1. Temporary scratch file for raw HLS (.ts) segments
+            val targetFile = File(context.cacheDir, "temp_hls_${taskId}.ts")
+            val tempTsFile = targetFile
             if (targetFile.exists()) targetFile.delete()
 
             var lastEmitTime = 0L
@@ -206,37 +209,81 @@ class HlsSegmentDownloader(
                 fos.flush()
             }
 
-            val finalFileSize = if (targetFile.exists() && targetFile.length() > 0L) targetFile.length() else totalDownloadedBytes
+            // 2. Transfer to final MP4 container using HardwareMediaMuxer
+            destFile.parentFile?.mkdirs()
+            Log.d(TAG, "Remuxing temp TS file (${tempTsFile.length()} bytes) to final MP4: ${destFile.absolutePath}")
 
-            // 1. Immediate State & Room Transition:
-            // Write absolute file path to task.localFilePath, update status atomically to COMPLETED
+            val remuxSuccess = try {
+                HardwareMediaMuxer.getInstance(context).remuxSingleStreamToMp4(tempTsFile, destFile)
+            } catch (e: Exception) {
+                Log.e(TAG, "Hardware remux to MP4 failed with exception: ${e.message}", e)
+                false
+            }
+
+            val finalFile: File
+            val finalMimeType: String
+
+            if (remuxSuccess && destFile.exists() && destFile.length() > 0L) {
+                Log.i(TAG, "HardwareMediaMuxer remux succeeded -> ${destFile.absolutePath} (${destFile.length()} bytes)")
+                finalFile = destFile
+                finalMimeType = "video/mp4"
+                try {
+                    tempTsFile.delete()
+                } catch (_: Exception) {}
+            } else {
+                Log.w(TAG, "Hardware remux to MP4 failed, falling back to moving temporary .ts file to output: ${destFile.absolutePath}")
+                val fallbackFile = if (outputFile.name.endsWith(".mp4", ignoreCase = true)) {
+                    File(outputFile.parentFile, outputFile.name.removeSuffix(".mp4").removeSuffix(".MP4") + ".ts")
+                } else {
+                    outputFile
+                }
+                fallbackFile.parentFile?.mkdirs()
+                if (fallbackFile.exists()) fallbackFile.delete()
+
+                val moved = tempTsFile.renameTo(fallbackFile)
+                if (!moved) {
+                    try {
+                        tempTsFile.copyTo(fallbackFile, overwrite = true)
+                        tempTsFile.delete()
+                    } catch (copyEx: Exception) {
+                        Log.e(TAG, "Failed to copy temp file to fallback: ${copyEx.message}", copyEx)
+                    }
+                }
+                finalFile = if (fallbackFile.exists() && fallbackFile.length() > 0L) fallbackFile else tempTsFile
+                finalMimeType = if (finalFile.name.endsWith(".ts", ignoreCase = true)) "video/mp2t" else "video/mp4"
+            }
+
+            val finalFileSize = if (finalFile.exists() && finalFile.length() > 0L) finalFile.length() else totalDownloadedBytes
+
+            // 3. State & Room Transition:
+            // Write absolute file path to task.localFilePath and mark COMPLETED
             try {
                 val db = ir.ali0003.downloader.data.local.AppDatabase.getInstance(context)
-                db.downloadDao().updateLocalFilePath(taskId, targetFile.absolutePath)
-                db.downloadDao().updateDownloadPath(taskId, targetFile.absolutePath)
+                db.downloadDao().updateLocalFilePath(taskId, finalFile.absolutePath)
+                db.downloadDao().updateDownloadPath(taskId, finalFile.absolutePath)
                 db.downloadDao().updateProgress(taskId, finalFileSize, finalFileSize, 0L, 0L)
                 db.downloadDao().updateStatus(taskId, ir.ali0003.downloader.data.model.DownloadStatus.COMPLETED)
-                db.downloadDao().markCompletedWithFile(taskId, targetFile.absolutePath, finalFileSize)
+                db.downloadDao().markCompletedWithFile(taskId, finalFile.absolutePath, finalFileSize)
             } catch (e: Exception) {
                 Log.w(TAG, "Error committing completed status in HlsSegmentDownloader: ${e.message}")
             }
 
-            // 2. Trigger MediaScannerConnection.scanFile with MIME type video/mp2t
-            if (!task.isHidden && targetFile.exists()) {
+            // 4. Trigger MediaScannerConnection.scanFile with MIME type
+            if (!task.isHidden && finalFile.exists()) {
                 try {
                     MediaScannerConnection.scanFile(
                         context,
-                        arrayOf(targetFile.absolutePath),
-                        arrayOf("video/mp2t")
+                        arrayOf(finalFile.absolutePath),
+                        arrayOf(finalMimeType)
                     ) { path, uri ->
-                        Log.d(TAG, "MediaScanner indexed completed HLS (.ts) video: $path -> $uri")
+                        Log.d(TAG, "MediaScanner indexed completed HLS video: $path -> $uri ($finalMimeType)")
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "MediaScanner indexing failed: ${e.message}")
                 }
             }
 
-            // 3. Emit final completion
+            // 5. Emit final completion
             emit(
                 DownloadProgress(
                     taskId = taskId,
@@ -253,6 +300,10 @@ class HlsSegmentDownloader(
 
         } catch (e: Exception) {
             Log.e(TAG, "HLS download unrecoverable failure for task $taskId: ${e.message}", e)
+            try {
+                val tempTsFile = File(context.cacheDir, "temp_hls_${taskId}.ts")
+                if (tempTsFile.exists()) tempTsFile.delete()
+            } catch (_: Exception) {}
             emit(
                 DownloadProgress(
                     taskId = taskId,

@@ -80,6 +80,7 @@ fun MainAppNavigation(
     }
 
     val activeDownloads by viewModel.activeDownloads.collectAsStateWithLifecycle()
+    val activePublicCount by viewModel.activePublicCount.collectAsStateWithLifecycle()
     val completedDownloads by viewModel.completedDownloads.collectAsStateWithLifecycle()
     val vaultDownloads by viewModel.vaultDownloads.collectAsStateWithLifecycle()
     val taskProgressMap by viewModel.taskProgressMap.collectAsStateWithLifecycle()
@@ -155,7 +156,7 @@ fun MainAppNavigation(
                                 onReEnforceImmersive()
                             },
                             browserCount = sniffedMediaList.size,
-                            activeCount = activeDownloads.size,
+                            activeCount = activePublicCount,
                             libraryCount = completedDownloads.size
                         )
                     }

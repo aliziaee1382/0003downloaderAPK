@@ -156,7 +156,18 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                     super.doUpdateVisitedHistory(view, url, isReload)
                     if (url != null && !isReload && url != _currentUrl.value && !url.startsWith("data:") && !url.startsWith("about:")) {
-                        this@BrowserViewModel.onPageStarted(url)
+                        val oldUri = try { Uri.parse(_currentUrl.value) } catch (_: Exception) { null }
+                        val newUri = try { Uri.parse(url) } catch (_: Exception) { null }
+                        val isSameBase = oldUri != null && newUri != null &&
+                                oldUri.host.equals(newUri.host, ignoreCase = true) &&
+                                oldUri.path == newUri.path
+                        if (!isSameBase) {
+                            this@BrowserViewModel.onPageStarted(url)
+                        } else {
+                            _inputUrl.value = url
+                            _currentUrl.value = url
+                            snifferEngine.updateCurrentPageInfo(url, null)
+                        }
                     }
                 }
 
@@ -216,6 +227,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     super.onProgressChanged(view, newProgress)
                     this@BrowserViewModel.onProgressChanged(newProgress)
+                    if (newProgress in 15..90) {
+                        try {
+                            view?.evaluateJavascript(VideoSnifferEngine.BLOB_HOOK_SNIFFER_JS, null)
+                            view?.evaluateJavascript(VideoSnifferEngine.PLAY_EVENT_SNIFFER_JS, null)
+                        } catch (_: Exception) {}
+                    }
                 }
 
                 override fun onReceivedTitle(view: WebView?, title: String?) {
@@ -426,11 +443,19 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     (it.isM3u8 && url.contains(".m3u8", ignoreCase = true) && isSameHlsStream(it.url, url))
                 } ?: false
                 if (!isSame) {
-                    // Replace on Active Play:
-                    // Instantly purge all previous background/preview videos from ViewModel & reset counter
-                    _sniffedMediaList.value = emptyList()
-                    _selectedMedia.value = null
-                    _detectedVideoQualities.value = emptyList()
+                    val hasValidCurrentMedia = currentActive != null && (
+                        currentActive.qualities.isNotEmpty() ||
+                        currentActive.fileSizeBytes >= 1024 * 1024L ||
+                        currentActive.isM3u8 ||
+                        currentActive.durationSeconds >= 10.0
+                    )
+                    // If we already have a valid sniffed video with qualities, never purge it
+                    // upon an unverified or preview play event. Only purge if there is no valid video yet.
+                    if (!hasValidCurrentMedia) {
+                        _sniffedMediaList.value = emptyList()
+                        _selectedMedia.value = null
+                        _detectedVideoQualities.value = emptyList()
+                    }
                 }
             }
         }
@@ -511,6 +536,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             _selectedMedia.value = updated
             _detectedVideoQualities.value = mergedQualities
         } else {
+            val hasValidCurrentMedia = currentActive != null && (
+                currentActive.qualities.isNotEmpty() ||
+                currentActive.fileSizeBytes >= 1024 * 1024L ||
+                currentActive.isM3u8 ||
+                currentActive.durationSeconds >= 10.0
+            )
+            val isIncomingSubstantial = cleanItem.qualities.isNotEmpty() ||
+                cleanItem.fileSizeBytes >= 1536 * 1024L ||
+                cleanItem.durationSeconds >= 10.0 ||
+                (cleanItem.isM3u8 && cleanItem.qualities.isNotEmpty())
+            if (hasValidCurrentMedia && !isIncomingSubstantial) {
+                // Safeguard: Do not allow a background preview or micro-clip to wipe the active detected media
+                return
+            }
             // Replace on Active Play:
             // Purge all previous background/preview videos, reset counter, and store ONLY this new active video
             _sniffedMediaList.value = listOf(cleanItem)
@@ -651,12 +690,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onPageStarted(url: String) {
+        val oldUri = try { Uri.parse(_currentUrl.value) } catch (_: Exception) { null }
+        val newUri = try { Uri.parse(url) } catch (_: Exception) { null }
+        val isSameBase = oldUri != null && newUri != null &&
+                oldUri.host.equals(newUri.host, ignoreCase = true) &&
+                oldUri.path == newUri.path &&
+                _currentUrl.value.isNotBlank()
+
         _isBrowserHome.value = false
         _isLoading.value = true
         _inputUrl.value = url
         _currentUrl.value = url
-        _hasActivePlayingVideo.value = false
-        clearSniffedMedia()
+        if (!isSameBase) {
+            _hasActivePlayingVideo.value = false
+            clearSniffedMedia()
+        }
         snifferEngine.updateCurrentPageInfo(url, null)
     }
 

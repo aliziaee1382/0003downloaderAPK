@@ -78,6 +78,9 @@ interface DownloadDao {
     @Query("SELECT COUNT(*) FROM download_tasks WHERE isHidden = 0")
     fun getPublicCount(): Flow<Int>
 
+    @Query("SELECT COUNT(*) FROM download_tasks WHERE isHidden = 0 AND status IN ('DOWNLOADING', 'QUEUED')")
+    fun getActivePublicCount(): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM download_tasks WHERE isHidden = 1")
     fun getVaultCount(): Flow<Int>
 

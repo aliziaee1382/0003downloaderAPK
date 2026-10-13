@@ -85,6 +85,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val publicCount: StateFlow<Int> = repository.publicCount
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 
+    val activePublicCount: StateFlow<Int> = repository.activePublicCount
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     val vaultCount: StateFlow<Int> = repository.vaultCount
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 

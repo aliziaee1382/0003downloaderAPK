@@ -109,10 +109,10 @@ class DownloadManagerController(
                         task.mimeType.contains("audio/", ignoreCase = true) || rawSanitized.endsWith(".mp4", ignoreCase = true)
                 val isHlsStream = !isExplicitMp4 && (task.isM3u8 || urlLower.contains(".m3u8") || task.mimeType.contains("mpegurl", ignoreCase = true))
                 val sanitizedName = if (isHlsStream) {
-                    if (rawSanitized.endsWith(".mp4", ignoreCase = true)) {
-                        rawSanitized.substringBeforeLast('.') + ".ts"
-                    } else if (!rawSanitized.endsWith(".ts", ignoreCase = true)) {
-                        "$rawSanitized.ts"
+                    if (rawSanitized.endsWith(".ts", ignoreCase = true)) {
+                        rawSanitized.substringBeforeLast('.') + ".mp4"
+                    } else if (!rawSanitized.endsWith(".mp4", ignoreCase = true)) {
+                        "$rawSanitized.mp4"
                     } else {
                         rawSanitized
                     }
@@ -186,6 +186,7 @@ class DownloadManagerController(
                         }
 
                         // Atomically mark completed in Room with the verified physical file path and exact size
+                        downloadDao.updateStatus(task.id, DownloadStatus.COMPLETED)
                         downloadDao.updateDownloadPath(task.id, finalPath)
                         downloadDao.markCompletedWithFile(task.id, finalPath, finalBytes)
 

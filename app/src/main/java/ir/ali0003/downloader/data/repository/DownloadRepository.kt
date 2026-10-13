@@ -11,6 +11,7 @@ interface DownloadRepository {
     val completedDownloads: Flow<List<DownloadTaskEntity>>
     val vaultDownloads: Flow<List<DownloadTaskEntity>>
     val publicCount: Flow<Int>
+    val activePublicCount: Flow<Int>
     val vaultCount: Flow<Int>
     val totalDownloadedBytes: Flow<Long>
 
@@ -62,6 +63,9 @@ class DownloadRepositoryImpl(
 
     override val publicCount: Flow<Int> =
         downloadDao.getPublicCount()
+
+    override val activePublicCount: Flow<Int> =
+        downloadDao.getActivePublicCount()
 
     override val vaultCount: Flow<Int> =
         downloadDao.getVaultCount()
