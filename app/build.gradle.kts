@@ -11,34 +11,20 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    applicationId = "ir.ali0003.downloader.snyhja"
+    applicationId = "ir.ali0003.downloader"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-ndk {
+
+    ndk {
       abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
     }
   }
 
   signingConfigs {
-    create("release") {
-      val uploadKey = file("${System.getenv("CM_BUILD_DIR") ?: project.rootDir}/my-upload-key.jks")
-      val debugKey = file("${rootDir}/debug.keystore")
-      if (uploadKey.exists()) {
-        storeFile = uploadKey
-        storePassword = "ali13821382ali"
-        keyAlias = "upload"
-        keyPassword = "ali13821382ali"
-      } else if (debugKey.exists()) {
-        storeFile = debugKey
-        storePassword = "android"
-        keyAlias = "androiddebugkey"
-        keyPassword = "android"
-      }
-    }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
@@ -52,7 +38,7 @@ ndk {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      signingConfig = signingConfigs.getByName("debugConfig")
     }
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")
@@ -80,7 +66,8 @@ ndk {
     includeInApk = false
     includeInBundle = true
   }
-packaging {
+
+  packaging {
     jniLibs {
       useLegacyPackaging = true
     }
@@ -110,8 +97,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
-  implementation("io.github.junkfood02.youtubedl-android:library:0.17.0")
-  implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.0")
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
@@ -124,6 +109,8 @@ dependencies {
   implementation("androidx.media3:media3-effect:1.3.1")
   implementation(libs.androidx.biometric)
   implementation(libs.androidx.security.crypto)
+  implementation("io.github.junkfood02.youtubedl-android:library:0.17.0")
+  implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.0")
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.logging.interceptor)
