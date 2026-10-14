@@ -48,6 +48,7 @@ class DownloadManagerController(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val downloadEngine = DownloadEngine(context)
+    private val ytDlpDownloadManager = YtDlpDownloadManager.getInstance(context)
 
     // Map of taskId -> Active Coroutine Job
     private val activeJobs = ConcurrentHashMap<Long, Job>()
@@ -235,6 +236,7 @@ class DownloadManagerController(
     fun pauseTask(taskId: Long) {
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
+        ytDlpDownloadManager.destroyProcessById(taskId)
         scope.launch {
             val task = downloadDao.findDownloadById(taskId)
             if (task != null) {
@@ -257,6 +259,7 @@ class DownloadManagerController(
     fun cancelTask(taskId: Long) {
         activeJobs[taskId]?.cancel()
         activeJobs.remove(taskId)
+        ytDlpDownloadManager.destroyProcessById(taskId)
         scope.launch {
             val task = downloadDao.findDownloadById(taskId)
             if (task != null) {

@@ -4,14 +4,40 @@ import android.app.Application
 import android.os.Build
 import android.util.Log
 import android.webkit.WebView
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.ffmpeg.FFmpeg
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 
 class DownloaderApp : Application() {
 
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         initWebViewEnvironment()
-        Log.i(TAG, "DownloaderApp initialized with lean native pipeline")
+        initYoutubeDL()
+        Log.i(TAG, "DownloaderApp initialized with ytdlnis native architecture")
+    }
+
+    private fun initYoutubeDL() {
+        appScope.launch {
+            try {
+                YoutubeDL.getInstance().init(applicationContext)
+                try {
+                    FFmpeg.getInstance().init(applicationContext)
+                    Log.i(TAG, "FFmpeg engine initialized successfully")
+                } catch (e: Exception) {
+                    Log.w(TAG, "FFmpeg initialization notice: ${e.message}")
+                }
+                Log.i(TAG, "YoutubeDL engine initialized successfully in background IO thread")
+            } catch (e: Exception) {
+                Log.e(TAG, "YoutubeDL initialization error: ${e.message}", e)
+            }
+        }
     }
 
     private fun initWebViewEnvironment() {
