@@ -18,6 +18,9 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+ndk {
+      abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
+    }
   }
 
   signingConfigs {
@@ -77,6 +80,11 @@ android {
     includeInApk = false
     includeInBundle = true
   }
+packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
@@ -102,6 +110,8 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.androidx.navigation.compose)
+  implementation("io.github.junkfood02.youtubedl-android:library:0.17.0")
+  implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.17.0")
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
