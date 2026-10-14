@@ -6,6 +6,9 @@ plugins {
   alias(libs.plugins.secrets)
 }
 
+// بررسی وجود فایل Keystore جهت جلوگیری از شکست بیلد در صورت نبود فایل
+val customKeystoreFile = file("${rootDir}/debug.keystore")
+
 android {
   namespace = "ir.ali0003.downloader"
   compileSdk = 36
@@ -26,10 +29,12 @@ android {
 
   signingConfigs {
     create("debugConfig") {
-      storeFile = file("${rootDir}/debug.keystore")
-      storePassword = "android"
-      keyAlias = "androiddebugkey"
-      keyPassword = "android"
+      if (customKeystoreFile.exists()) {
+        storeFile = customKeystoreFile
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
@@ -38,10 +43,15 @@ android {
       isMinifyEnabled = true
       isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("debugConfig")
+      // تنها در صورتی که فایل کلید فیزیکی وجود داشته باشد امضا اعمال می‌شود
+      if (customKeystoreFile.exists()) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
     debug {
-      signingConfig = signingConfigs.getByName("debugConfig")
+      if (customKeystoreFile.exists()) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
   }
 
@@ -70,6 +80,19 @@ android {
   packaging {
     jniLibs {
       useLegacyPackaging = true
+      // جلوگیری از خطای تداخل باینری‌های مشترک C++ در FFmpeg و yt-dlp
+      pickFirsts += listOf(
+        "lib/arm64-v8a/libc++_shared.so",
+        "lib/armeabi-v7a/libc++_shared.so",
+        "lib/x86/libc++_shared.so",
+        "lib/x86_64/libc++_shared.so"
+      )
+    }
+    resources {
+      excludes += listOf(
+        "/META-INF/{AL2.0,LGPL2.1}",
+        "/META-INF/INDEX.LIST"
+      )
     }
   }
 }
